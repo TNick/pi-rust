@@ -566,7 +566,8 @@ impl TuiAltScreen {
     ///
     /// Resize events always schedule a repaint. Other events are delivered to
     /// the currently focused component; consumed events schedule a repaint.
-    /// Events with no focused component are safely ignored.
+    /// Events are ignored while the TUI is stopped or when no component has
+    /// focus.
     ///
     /// # Parameters
     /// - `event`: Normalized event emitted by the terminal input loop.
@@ -574,6 +575,10 @@ impl TuiAltScreen {
     /// # Returns
     /// `true` when the resize path or focused component consumed the event.
     pub fn dispatch_input(&self, event: InputEvent) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+
         if matches!(&event, InputEvent::Resize(_, _)) {
             self.note_resize();
             return true;
@@ -1555,6 +1560,24 @@ mod tests {
     use super::*;
     use crate::{Editor, Focusable, Text};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn dispatch_input_ignores_events_after_stop() {
+        let tui = TuiAltScreen::new(Box::new(ResizableTerminal::new(40, 8)), false, None);
+        let editor = Arc::new(Editor::simple());
+        editor.set_focused(true);
+        let focused: Arc<dyn Component> = editor.clone();
+        tui.set_focus(Some(focused));
+        tui.start_readerless();
+
+        assert!(tui.dispatch_input(InputEvent::Paste("before stop".into())));
+        assert_eq!(editor.get_text(), "before stop");
+
+        tui.stop(TuiStopOptions::default());
+
+        assert!(!tui.dispatch_input(InputEvent::Paste("after stop".into())));
+        assert_eq!(editor.get_text(), "before stop");
+    }
 
     /// A terminal whose size the test controls, so a resize can be replayed
     /// exactly as the host input loop sees it.
