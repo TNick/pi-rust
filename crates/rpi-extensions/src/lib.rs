@@ -82,6 +82,7 @@ pub use oauth::{
     list as list_oauth_providers, request as request_oauth, OAuthActionResponse,
     OAuthExtensionError, OAuthProviderInfo, OAuthResponseKind,
 };
+pub use package_roots::package_resource_dirs;
 pub use prompt_transform::emit_before_agent_start;
 pub use provider::PluggableProvider;
 pub use provider_hooks::ExtensionProviderHooks;
@@ -107,6 +108,7 @@ mod editor_text;
 mod event_log;
 mod loader;
 mod oauth;
+mod package_roots;
 mod prompt_transform;
 mod provider;
 mod provider_hooks;

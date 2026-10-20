@@ -605,11 +605,13 @@ fn write_registry(cwd: &Path, r: &PackageRegistry) -> Result<(), String> {
 }
 pub fn project_package_dirs(cwd: &Path, kind: &str) -> Vec<PathBuf> {
     match read_registry(cwd) {
-        Ok(registry) => registry
-            .packages
-            .into_iter()
-            .map(|p| cwd.join(".rpi/packages").join(p.name).join(kind))
-            .collect(),
+        Ok(registry) => rpi_extensions::package_resource_dirs(
+            registry
+                .packages
+                .into_iter()
+                .map(|package| cwd.join(".rpi/packages").join(package.name)),
+            kind,
+        ),
         Err(error) => {
             eprintln!("warning: could not load project package registry: {error}");
             Vec::new()
