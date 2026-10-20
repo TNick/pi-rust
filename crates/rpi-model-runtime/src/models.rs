@@ -348,15 +348,17 @@ pub fn provider_to_models(
         }
         if matches!(api, Api::OpenaiCompletions | Api::OpenaiResponses) {
             if let Some(value) = definition.compat.clone() {
-                model.compat = if api == Api::OpenaiResponses {
-                    serde_json::from_value(value)
-                        .ok()
-                        .map(StreamingProtocolCompat::OpenaiResponses)
+                model.compat = Some(if api == Api::OpenaiResponses {
+                    match serde_json::from_value(value.clone()) {
+                        Ok(compat) => StreamingProtocolCompat::OpenaiResponses(compat),
+                        Err(_) => StreamingProtocolCompat::Other(value),
+                    }
                 } else {
-                    serde_json::from_value(value)
-                        .ok()
-                        .map(StreamingProtocolCompat::OpenaiCompletions)
-                };
+                    match serde_json::from_value(value.clone()) {
+                        Ok(compat) => StreamingProtocolCompat::OpenaiCompletions(compat),
+                        Err(_) => StreamingProtocolCompat::Other(value),
+                    }
+                });
             }
         }
         if !headers.is_empty() {

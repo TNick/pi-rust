@@ -502,6 +502,55 @@ pub enum ThinkingLevel {
     Max,
 }
 
+impl ThinkingLevel {
+    /// Thinking levels in their canonical increasing order.
+    pub const ORDERED: [Self; 7] = [
+        Self::Off,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Xhigh,
+        Self::Max,
+    ];
+
+    /// Return the canonical lowercase name of this thinking level.
+    ///
+    /// # Returns
+    /// The stable lowercase name used in configuration and serialization.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// Parse a thinking-level name without applying case or whitespace rules.
+    ///
+    /// # Parameters
+    /// - `name`: Exact lowercase name to parse.
+    ///
+    /// # Returns
+    /// The matching level, or `None` when the name is not canonical.
+    pub fn parse_name(name: &str) -> Option<Self> {
+        match name {
+            "off" => Some(Self::Off),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+}
+
 /// Maps pi thinking levels to provider-specific values; `None` marks a level as
 /// unsupported. Mirrors `ThinkingLevelMap = Partial<Record<...>>`.
 pub type ThinkingLevelMap = BTreeMap<ThinkingLevel, Option<String>>;

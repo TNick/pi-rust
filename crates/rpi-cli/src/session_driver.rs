@@ -589,30 +589,12 @@ async fn query_status(lane: &Arc<dyn AgentLane>, streaming: bool) -> DriverStatu
 
 /// The wire/display name of a thinking level.
 fn thinking_level_name(level: ThinkingLevel) -> &'static str {
-    use ThinkingLevel::*;
-    match level {
-        Off => "off",
-        Minimal => "minimal",
-        Low => "low",
-        Medium => "medium",
-        High => "high",
-        Xhigh => "xhigh",
-        Max => "max",
-    }
+    level.as_str()
 }
 
 /// Parse a thinking-level name (case-insensitive); `None` for an unknown name.
 fn parse_thinking_level_name(name: &str) -> Option<ThinkingLevel> {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "off" => Some(ThinkingLevel::Off),
-        "minimal" => Some(ThinkingLevel::Minimal),
-        "low" => Some(ThinkingLevel::Low),
-        "medium" => Some(ThinkingLevel::Medium),
-        "high" => Some(ThinkingLevel::High),
-        "xhigh" => Some(ThinkingLevel::Xhigh),
-        "max" => Some(ThinkingLevel::Max),
-        _ => None,
-    }
+    ThinkingLevel::parse_name(&name.trim().to_ascii_lowercase())
 }
 
 #[cfg(test)]

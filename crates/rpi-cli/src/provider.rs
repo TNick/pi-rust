@@ -1073,6 +1073,19 @@ fn find_cli_model(
     anthropic_credentials: &AnthropicCredentials,
     openai_credentials: &OpenAiCredentials,
 ) -> Result<Option<Model>, ResolveError> {
+    // Delegate the common exact provider/model identity lookup to the reusable
+    // host API. Alias and ambiguous cases continue through CLI auth policy.
+    if let Some(provider_id) = provider {
+        let selection = rpi_model_runtime::ModelSelection {
+            provider_id: provider_id.to_string(),
+            model_id: pattern.to_string(),
+            thinking: DEFAULT_THINKING_LEVEL,
+        };
+        if let Ok(resolved) = rpi_model_runtime::resolve_selection(catalog, &selection) {
+            return Ok(Some(catalog[resolved.catalog_index].clone()));
+        }
+    }
+
     let exact_matches: Vec<&Model> = catalog
         .iter()
         .filter(|model| {

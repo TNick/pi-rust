@@ -236,16 +236,7 @@ pub const VALID_THINKING_LEVELS: &[&str] =
 
 /// Parse a thinking-level string. Mirrors TS `isValidThinkingLevel`.
 pub fn parse_thinking_level(s: &str) -> Option<ThinkingLevel> {
-    Some(match s {
-        "off" => ThinkingLevel::Off,
-        "minimal" => ThinkingLevel::Minimal,
-        "low" => ThinkingLevel::Low,
-        "medium" => ThinkingLevel::Medium,
-        "high" => ThinkingLevel::High,
-        "xhigh" => ThinkingLevel::Xhigh,
-        "max" => ThinkingLevel::Max,
-        _ => return None,
-    })
+    ThinkingLevel::parse_name(s)
 }
 
 /// `@file`-argument helper mirroring the TS parser: a leading `@` marks a file

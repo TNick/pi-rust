@@ -799,32 +799,13 @@ pub(super) fn thinking_level_description(level: rpi_ai::types::ThinkingLevel) ->
 /// The lowercase serialized name of a [`ThinkingLevel`] (matches its
 /// `#[serde(rename_all = "lowercase")]` form): "off", "minimal", … "max".
 pub(super) fn thinking_level_name(level: rpi_ai::types::ThinkingLevel) -> &'static str {
-    use rpi_ai::types::ThinkingLevel::*;
-    match level {
-        Off => "off",
-        Minimal => "minimal",
-        Low => "low",
-        Medium => "medium",
-        High => "high",
-        Xhigh => "xhigh",
-        Max => "max",
-    }
+    level.as_str()
 }
 
 /// Parse a thinking-level name back to the enum (case-insensitive). Returns
 /// `None` for an unknown name; used by the `/thinking` selector callback.
 pub(super) fn thinking_level_from_name(name: &str) -> Option<rpi_ai::types::ThinkingLevel> {
-    use rpi_ai::types::ThinkingLevel::*;
-    match name.to_ascii_lowercase().as_str() {
-        "off" => Some(Off),
-        "minimal" => Some(Minimal),
-        "low" => Some(Low),
-        "medium" => Some(Medium),
-        "high" => Some(High),
-        "xhigh" => Some(Xhigh),
-        "max" => Some(Max),
-        _ => None,
-    }
+    rpi_ai::types::ThinkingLevel::parse_name(&name.to_ascii_lowercase())
 }
 
 /// Build + open the `/thinking` selector. Items are the levels the current
