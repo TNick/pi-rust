@@ -7,6 +7,7 @@
 mod catalog;
 mod credentials;
 mod fingerprint;
+mod live_catalog;
 mod models;
 mod safe_snapshot;
 mod selection;
@@ -21,6 +22,7 @@ pub use fingerprint::{
     ModelConfigurationFingerprint, ModelExecutionExclusion, ModelExecutionFingerprint,
     model_configuration_fingerprint, model_execution_fingerprint,
 };
+pub use live_catalog::{ModelCatalog, ModelCatalogEvent, ModelCatalogSnapshot};
 pub use models::{
     ConfigValueResolver, ModelDefinition, ModelsConfig, ProviderConfig, builtin_api_key_env,
     has_header_auth, provider_to_models, resolve_credential,

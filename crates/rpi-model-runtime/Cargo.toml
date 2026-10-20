@@ -17,3 +17,4 @@ serde_json = { workspace = true }
 indexmap = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
