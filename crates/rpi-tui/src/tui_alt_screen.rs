@@ -132,7 +132,7 @@ pub struct TuiAltScreen {
     running: Arc<Mutex<bool>>,
     show_hardware_cursor: Mutex<bool>,
     clear_on_shrink: Mutex<bool>,
-    focused: Mutex<Option<Arc<dyn Component>>>,
+    focused: Arc<Mutex<Option<Arc<dyn Component>>>>,
     full_redraw_count: Mutex<usize>,
     previous_screen: Mutex<Vec<String>>,
     /// Size the frame in `previous_screen` was laid out for. Any mismatch means
@@ -142,7 +142,7 @@ pub struct TuiAltScreen {
     /// Set when a resize event reaches the loop. The window can end up at the
     /// size it already had (dragged out and back) while every intermediate
     /// resize reflowed the terminal's rows, so the next frame repaints whole.
-    resize_dirty: AtomicBool,
+    resize_dirty: Arc<AtomicBool>,
     scroll_top: Mutex<usize>,
     stick_to_bottom: Mutex<bool>,
     current_frame: Mutex<Option<LayoutFrame>>,
@@ -167,7 +167,7 @@ pub struct TuiAltScreen {
     scheduler: Arc<RenderScheduler>,
     /// Whether [`TuiAltScreen::start_render_scheduler`] succeeded. When false,
     /// render requests paint inline (standalone/unit-test behaviour).
-    scheduler_started: AtomicBool,
+    scheduler_started: Arc<AtomicBool>,
     /// The scheduler thread, joined by [`TuiAltScreen::stop`] so a parked frame
     /// cannot repaint the terminal after shutdown.
     scheduler_thread: Mutex<Option<JoinHandle<()>>>,
@@ -194,11 +194,11 @@ impl TuiAltScreen {
             running: Arc::new(Mutex::new(false)),
             show_hardware_cursor: Mutex::new(show_hardware_cursor),
             clear_on_shrink: Mutex::new(false),
-            focused: Mutex::new(None),
+            focused: Arc::new(Mutex::new(None)),
             full_redraw_count: Mutex::new(0),
             previous_screen: Mutex::new(Vec::new()),
             painted_size: Mutex::new((0, 0)),
-            resize_dirty: AtomicBool::new(false),
+            resize_dirty: Arc::new(AtomicBool::new(false)),
             scroll_top: Mutex::new(0),
             stick_to_bottom: Mutex::new(true),
             current_frame: Mutex::new(None),
@@ -211,7 +211,7 @@ impl TuiAltScreen {
             overlays: Arc::new(OverlayManager::new()),
             render_suspended: Mutex::new(false),
             scheduler: Arc::new(RenderScheduler::new()),
-            scheduler_started: AtomicBool::new(false),
+            scheduler_started: Arc::new(AtomicBool::new(false)),
             scheduler_thread: Mutex::new(None),
         }
     }
@@ -575,10 +575,7 @@ impl TuiAltScreen {
             return true;
         }
 
-        let Some(focused) = self.get_focus() else {
-            return false;
-        };
-        let consumed = focused.handle_event(&event);
+        let consumed = dispatch_to_focused(&self.focused, &event);
         if consumed {
             self.request_render(false);
         }
@@ -1096,6 +1093,25 @@ impl TuiAltScreen {
     }
 }
 
+/// Dispatch one event to the current focus without requiring a TUI borrow.
+///
+/// The terminal reader thread uses this helper because its callback outlives
+/// the borrowed `TuiAltScreen::start` call.
+///
+/// # Parameters
+/// - `focused`: Shared currently focused component.
+/// - `event`: Normalized event to dispatch.
+///
+/// # Returns
+/// `true` when the focused component consumed the event.
+fn dispatch_to_focused(focused: &Mutex<Option<Arc<dyn Component>>>, event: &InputEvent) -> bool {
+    focused
+        .lock()
+        .ok()
+        .and_then(|focused| focused.clone())
+        .is_some_and(|focused| focused.handle_event(event))
+}
+
 impl Component for TuiAltScreen {
     fn render(&self, width: usize) -> Vec<String> {
         self.get_layout_root()
@@ -1206,8 +1222,12 @@ impl TUI for TuiAltScreen {
             *running = true;
         }
 
-        // Clone the necessary Arc references for the closures
+        // Clone the state needed by callbacks that run on the terminal reader.
         let running = self.running.clone();
+        let focused = Arc::clone(&self.focused);
+        let resize_dirty = Arc::clone(&self.resize_dirty);
+        let scheduler = Arc::clone(&self.scheduler);
+        let scheduler_started = Arc::clone(&self.scheduler_started);
 
         // Keyboard protocol stacks belong to each screen buffer. Switch first
         // so the terminal enables its protocol on the screen that receives input.
@@ -1215,19 +1235,35 @@ impl TUI for TuiAltScreen {
             self.enter_alt_screen();
         }
 
-        // Get terminal and start it (spawns its own input-reader thread whose
-        // callbacks are stubs below; kept for the non-pi-tui callers that still
-        // rely on `start()`). The asynchronous interactive path uses
-        // `start_readerless` instead to avoid a competing stdin reader.
+        // Start the terminal reader and route events to the focused component.
+        // Consumed input parks a repaint when the host has started the render
+        // scheduler. The asynchronous interactive path uses `start_readerless`
+        // instead to avoid a competing stdin reader.
         if let Ok(terminal) = self.terminal.lock() {
             terminal.start(
                 Box::new(move |event: InputEvent| {
                     if !*running.lock().unwrap() {
                         return;
                     }
-                    let _ = event; // stub: input handled by the caller's own loop
+                    if matches!(&event, InputEvent::Resize(_, _)) {
+                        resize_dirty.store(true, Ordering::Release);
+                    } else if dispatch_to_focused(&focused, &event)
+                        && scheduler_started.load(Ordering::Acquire)
+                    {
+                        scheduler.park(false);
+                    }
                 }),
-                Box::new(move || {}),
+                Box::new({
+                    let resize_dirty = Arc::clone(&self.resize_dirty);
+                    let scheduler = Arc::clone(&self.scheduler);
+                    let scheduler_started = Arc::clone(&self.scheduler_started);
+                    move || {
+                        resize_dirty.store(true, Ordering::Release);
+                        if scheduler_started.load(Ordering::Acquire) {
+                            scheduler.park(false);
+                        }
+                    }
+                }),
             );
             if self.uses_main_screen() {
                 terminal.disable_mouse();
@@ -1317,16 +1353,15 @@ impl TuiAltScreen {
     /// Set up the tty and render the first frame **without** spawning the
     /// `ProcessTerminal` input-reader thread. The caller owns the input loop
     /// (e.g. a `spawn_blocking` `event::read()` loop) and handles resize/key
-    /// events directly via [`TuiAltScreen::note_resize`] / its key dispatch.
+    /// events directly via [`TuiAltScreen::dispatch_input`].
     ///
     /// The first frame is painted inline. Hosts that want the native-pi frame
     /// throttle should also call [`TuiAltScreen::start_render_scheduler`].
     ///
-    /// This avoids two `event::read()` consumers racing the same stdin queue
-    /// (the stub thread in [`TUI::start`] dropped a fraction of keystrokes).
+    /// This avoids two `event::read()` consumers racing the same stdin queue.
     /// The caller is responsible for `enable_raw_mode`-dependent event reads,
-    /// for calling `note_resize` on `Event::Resize`, and for running the
-    /// `ensure_size` watchdog from a periodic tick.
+    /// forwarding events through [`TuiAltScreen::dispatch_input`], and running
+    /// the `ensure_size` watchdog from a periodic tick.
     pub fn start_readerless(&self) {
         if let Ok(mut running) = self.running.lock() {
             *running = true;
