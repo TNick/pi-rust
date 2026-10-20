@@ -13,9 +13,9 @@ mod selection;
 
 pub use catalog::{apply_provider_defaults, build_catalog, resolve_provider_headers};
 pub use credentials::{
-    AuthStore, Credential, CredentialRequestSource, CredentialSource, HostCredentialMaterial,
-    ProtectedCredential, ProtectedCredentialResolver, ResolvedCredential, readiness_from_catalog,
-    resolve_credential_protected,
+    AuthStore, Credential, CredentialRequestSource, CredentialResolutionError, CredentialSource,
+    HostCredentialMaterial, ProtectedCredential, ProtectedCredentialResolver, ResolvedCredential,
+    readiness_from_catalog, resolve_credential_protected, resolve_credential_protected_with_policy,
 };
 pub use fingerprint::{
     ModelConfigurationFingerprint, ModelExecutionExclusion, ModelExecutionFingerprint,

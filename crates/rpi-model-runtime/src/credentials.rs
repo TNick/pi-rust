@@ -88,6 +88,18 @@ impl<T> fmt::Debug for HostCredentialMaterial<T> {
     }
 }
 
+/// Reports protected credential resolution failures without secret details.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CredentialResolutionError {
+    /// Host policy denied access to the requested source.
+    #[error("credential source access denied")]
+    AccessDenied,
+    /// Host credential resolution could not complete safely.
+    #[error("credential resolution failed")]
+    ResolverFailure,
+}
+
 /// Resolves secret source requests without transferring plaintext to runtime.
 pub trait ProtectedCredentialResolver<T>: Send + Sync {
     /// Resolves one non-secret source descriptor using host-owned facilities.
@@ -102,10 +114,27 @@ pub trait ProtectedCredentialResolver<T>: Send + Sync {
     ///
     /// # Returns
     /// Host-protected material and its safe source classification when found.
-    fn resolve(
+    fn resolve(&self, source: CredentialRequestSource) -> Option<HostCredentialMaterial<T>>;
+
+    /// Resolves one source while distinguishing denial from a source miss.
+    ///
+    /// Implementations with authorization policy should override this method
+    /// and return an error for denial or resolver failure. The default adapter
+    /// preserves legacy behavior for existing implementations, which cannot
+    /// report those errors.
+    ///
+    /// # Parameters
+    /// - `source`: Provider and source kind, without credential values.
+    ///
+    /// # Returns
+    /// `Ok(None)` when the source is absent, `Ok(Some(_))` when selected, or a
+    /// non-secret error that stops source precedence.
+    fn resolve_with_policy(
         &self,
         source: CredentialRequestSource,
-    ) -> Option<HostCredentialMaterial<T>>;
+    ) -> Result<Option<HostCredentialMaterial<T>>, CredentialResolutionError> {
+        Ok(self.resolve(source))
+    }
 }
 
 /// Protected request credential selected by upstream precedence.
@@ -144,13 +173,54 @@ impl<T> fmt::Debug for ProtectedCredential<T> {
 /// - `resolver`: Host-owned protected-material resolver.
 ///
 /// # Returns
-/// The selected protected credential, or a safe missing/anonymous status.
+/// The selected protected credential, or a safe missing/anonymous status. A
+/// resolver error fails closed as `Missing` and does not continue precedence.
 pub fn resolve_credential_protected<T>(
     provider: &str,
     config: Option<&crate::ProviderConfig>,
     manifest: Option<&ProviderManifest>,
     resolver: &dyn ProtectedCredentialResolver<T>,
 ) -> ProtectedCredential<T> {
+    let bearer = config
+        .and_then(|provider_config| provider_config.auth_header)
+        .unwrap_or(false);
+    match resolve_credential_protected_with_policy(provider, config, manifest, resolver) {
+        Ok(credential) => credential,
+        Err(_) => ProtectedCredential {
+            material: None,
+            source: CredentialSource::Missing,
+            bearer,
+        },
+    }
+}
+
+/// Resolves a protected credential and aborts precedence on host policy errors.
+///
+/// A source miss falls through to the next configured source. Access denial or
+/// resolver failure returns an error immediately, so lower-priority sources
+/// are never queried and no credential material is returned to a provider
+/// caller.
+///
+/// # Parameters
+/// - `provider`: Stable provider identity.
+/// - `config`: Provider configuration from the same immutable snapshot used by
+///   the resolver, used only for source presence and auth-header behavior.
+/// - `manifest`: Optional provider package declaration.
+/// - `resolver`: Host-owned protected-material resolver.
+///
+/// # Returns
+/// A protected credential only after a source is selected, or an anonymous or
+/// missing status when every source misses.
+///
+/// # Errors
+/// Returns a non-secret resolver error immediately when host policy denies a
+/// source or resolution cannot complete safely.
+pub fn resolve_credential_protected_with_policy<T>(
+    provider: &str,
+    config: Option<&crate::ProviderConfig>,
+    manifest: Option<&ProviderManifest>,
+    resolver: &dyn ProtectedCredentialResolver<T>,
+) -> Result<ProtectedCredential<T>, CredentialResolutionError> {
     let bearer = config
         .and_then(|provider_config| provider_config.auth_header)
         .unwrap_or(false);
@@ -188,17 +258,17 @@ pub fn resolve_credential_protected<T>(
         });
     }
     for request_source in sources {
-        if let Some(resolved) = resolver.resolve(request_source) {
+        if let Some(resolved) = resolver.resolve_with_policy(request_source)? {
             let is_oauth = resolved.source == CredentialSource::StoredOauth;
             let is_anthropic_auth_token = matches!(
                 &resolved.source,
                 CredentialSource::Environment(name) if name == "ANTHROPIC_AUTH_TOKEN"
             );
-            return ProtectedCredential {
+            return Ok(ProtectedCredential {
                 material: Some(resolved.material),
                 source: resolved.source,
                 bearer: is_oauth || is_anthropic_auth_token || bearer,
-            };
+            });
         }
     }
     let source = if manifest.is_some_and(|value| !value.requires_auth) {
@@ -206,11 +276,11 @@ pub fn resolve_credential_protected<T>(
     } else {
         CredentialSource::Missing
     };
-    ProtectedCredential {
+    Ok(ProtectedCredential {
         material: None,
         source,
         bearer,
-    }
+    })
 }
 
 /// Safe description of the source selected for a provider credential.
@@ -308,3 +378,7 @@ pub fn readiness_from_catalog(
     }
     CredentialSource::Missing
 }
+
+#[cfg(test)]
+#[path = "credentials_tests.rs"]
+mod tests;
