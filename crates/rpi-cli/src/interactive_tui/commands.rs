@@ -127,18 +127,14 @@ impl SlashCommand for ModelCommand {
     }
     fn execute(&self, ctx: &CommandContext, args: &str) {
         let term = args.trim();
+        let catalog = ctx.model_catalog();
         if !term.is_empty() {
             // /model <name> — direct switch by id (pi handleModelCommand).
             //
             // upstream only switches on an EXACT match; a term that matches
             // nothing falls through to the selector with the query prefilled
             // instead of erroring out (`showModelSelector(searchTerm)`).
-            if let Some(model) = find_model_selector_match(
-                &ctx.model_catalog
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner()),
-                term,
-            ) {
+            if let Some(model) = find_model_selector_match(&catalog, term) {
                 let lane = ctx.lane.clone();
                 let state = ctx.state.clone();
                 let tui = ctx.tui.clone();
@@ -154,9 +150,7 @@ impl SlashCommand for ModelCommand {
             &ctx.editor_container,
             &ctx.editor,
             &ctx.tui,
-            &ctx.model_catalog
-                .read()
-                .unwrap_or_else(|error| error.into_inner()),
+            &catalog,
             &ctx.lane,
             &current_id,
             &ctx.chat,
@@ -238,9 +232,7 @@ impl SlashCommand for ThinkingCommand {
             &ctx.editor,
             &ctx.tui,
             &ctx.lane,
-            &ctx.model_catalog
-                .read()
-                .unwrap_or_else(|error| error.into_inner()),
+            &ctx.model_catalog(),
             &current_id,
             &ctx.chat,
         );
@@ -683,9 +675,7 @@ impl SlashCommand for SettingsCommand {
             &ctx.editor,
             &ctx.tui,
             &ctx.lane,
-            &ctx.model_catalog
-                .read()
-                .unwrap_or_else(|error| error.into_inner()),
+            &ctx.model_catalog(),
             &current_id,
             &ctx.chat,
         );
@@ -706,9 +696,7 @@ impl SlashCommand for ScopedModelsCommand {
             &ctx.editor_container,
             &ctx.editor,
             &ctx.tui,
-            &ctx.model_catalog
-                .read()
-                .unwrap_or_else(|error| error.into_inner()),
+            &ctx.model_catalog(),
             &ctx.chat,
         );
     }

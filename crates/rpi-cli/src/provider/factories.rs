@@ -124,21 +124,28 @@ impl RuntimeFactories {
         auth: RequestAuth,
         settings: &settings::Settings,
     ) -> Option<(Arc<dyn Provider>, Arc<ExecutionBinding>)> {
-        let factory = self
-            .providers
-            .get(provider_id)
-            .filter(|_| {
-                self.provider_apis
-                    .get(provider_id)
-                    .map_or(true, |declared| declared == api.as_str())
-            })
-            .or_else(|| self.protocols.get(api.as_str()))?;
+        let extension_factory = self.providers.get(provider_id).filter(|_| {
+            self.provider_apis
+                .get(provider_id)
+                .map_or(true, |declared| declared == api.as_str())
+        });
+        let (factory, provider_options_version) = if let Some(factory) = extension_factory {
+            let version = self
+                .manifests
+                .iter()
+                .find(|manifest| manifest.id == provider_id)
+                .and_then(|manifest| manifest.provider_options_version);
+            (factory, version)
+        } else {
+            (self.protocols.get(api.as_str())?, None)
+        };
         let binding = Arc::new(ExecutionBinding::new(provider_id, models, auth));
         let inner = factory.create(provider_id, binding.models().to_vec(), settings);
         let provider = Arc::new(ConfiguredProvider {
             id: provider_id.into(),
             inner,
             binding: binding.clone(),
+            provider_options_version,
         });
         Some((provider, binding))
     }
@@ -148,6 +155,7 @@ struct ConfiguredProvider {
     id: String,
     inner: Arc<dyn Provider>,
     binding: Arc<ExecutionBinding>,
+    provider_options_version: Option<u32>,
 }
 
 /// The harness resolves providers by ID. Keep each ID unique even when a
@@ -251,8 +259,35 @@ impl Provider for ConfiguredProvider {
         let Some((model, options)) = self.binding.prepare(model, options) else {
             return unbound_model_error(model, &self.id);
         };
+        if !model.provider_options.is_empty() && self.provider_options_version != Some(1) {
+            return provider_options_error(&model, &self.id);
+        }
         self.inner.stream_simple(&model, context, &options).await
     }
+}
+
+/// Returns an error stream when opaque model options have no declared owner.
+///
+/// # Parameters
+/// - `model`: Selected model with unsupported opaque options.
+/// - `provider_id`: Provider receiving the attempted request.
+///
+/// # Returns
+/// A stream with one terminal error event.
+fn provider_options_error(model: &Model, provider_id: &str) -> AssistantMessageEventStream {
+    let (mut producer, stream) = rpi_ai::event_stream::create_assistant_message_event_stream();
+    producer.push(rpi_ai::AssistantMessageEvent::Error {
+        reason: rpi_ai::types::ErrorReason::Error,
+        error: rpi_ai::types::AssistantMessage::terminal(
+            model.api.clone(),
+            provider_id,
+            model.id.clone(),
+            rpi_ai::types::StopReason::Error,
+            "provider does not support opaque model options",
+            0,
+        ),
+    });
+    stream
 }
 
 #[cfg(test)]
@@ -407,6 +442,51 @@ mod tests {
             assert_eq!(result.stop_reason, StopReason::Error);
         }
         assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    /// Built-in providers fail closed instead of silently dropping opaque options.
+    #[tokio::test]
+    async fn builtin_provider_rejects_nonempty_opaque_options() {
+        let calls = Calls::default();
+        let mut factories = RuntimeFactories::default();
+        factories.protocols.insert(
+            Api::OpenaiCompletions.as_str().into(),
+            Arc::new(RecordingFactory(calls.clone())),
+        );
+        let mut model = Model::new(
+            "custom",
+            "Custom",
+            Api::OpenaiCompletions,
+            "local",
+            "https://example.test",
+        );
+        model.provider_options.insert(
+            "opaque-setting".into(),
+            serde_json::json!("must-not-be-dropped"),
+        );
+        let provider = factories
+            .configure(
+                "local",
+                &Api::OpenaiCompletions,
+                vec![model.clone()],
+                RequestAuth::None,
+                &settings::Settings::default(),
+            )
+            .expect("built-in provider factory")
+            .0;
+
+        let mut stream = provider
+            .stream_simple(
+                &model,
+                &Context::new(vec![]),
+                &SimpleStreamOptions::default(),
+            )
+            .await;
+        assert!(matches!(
+            stream.next().await,
+            Some(AssistantMessageEvent::Error { .. })
+        ));
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -202,12 +202,16 @@ pub struct Model {
     pub compat: Option<StreamingProtocolCompat>,
     /// Runtime-only opaque options retained from provider model configuration.
     ///
-    /// Built-in adapters do not interpret this map. They must add explicit
-    /// provider-specific handling before any key here can affect a request.
-    /// The extension provider JSON envelope also omits this field, so plugin
-    /// transport needs a separately versioned API before plugins can consume it.
-    /// It is excluded from serialization because arbitrary properties cannot
-    /// be assumed safe for public catalog or session output.
+    /// Built-in adapters reject non-empty values unless they add explicit
+    /// provider-specific handling. The CLI applies the same fail-closed rule.
+    /// Extension providers that declare `providerOptionsVersion: 1` receive
+    /// non-empty values through the versioned `providerOptions` request field.
+    /// Other extension providers reject calls with non-empty options. This field
+    /// may contain arbitrary runtime configuration and must not contain
+    /// credentials, authorization headers, or other secrets. It is excluded
+    /// from ordinary serialization and Debug output because arbitrary
+    /// properties are not safe for public catalog or session output. Values
+    /// are skipped by ordinary serialization and redacted in `Debug` output.
     #[serde(skip)]
     pub provider_options: BTreeMap<String, serde_json::Value>,
 }

@@ -2425,6 +2425,7 @@ fn command_package_manifest(
         )],
         api_key_env: Some("RPI_TEST_PROVIDER_COMMAND_KEY".into()),
         requires_auth,
+        provider_options_version: None,
     }
 }
 

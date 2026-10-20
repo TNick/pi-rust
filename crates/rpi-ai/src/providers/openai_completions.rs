@@ -15,7 +15,9 @@ use crate::event_stream::{
     AssistantMessageEventStreamProducer,
 };
 use crate::model::{MaxTokensField, Model, StreamingProtocolCompat};
-use crate::provider::{Provider, RequestSecret, SimpleStreamOptions};
+use crate::provider::{
+    reject_opaque_provider_options, Provider, RequestSecret, SimpleStreamOptions,
+};
 use crate::providers::anthropic::cost::calculate_cost;
 use crate::providers::anthropic::json_parse::parse_streaming_json;
 use crate::providers::anthropic::retry::retry_provider_request;
@@ -105,6 +107,9 @@ impl Provider for OpenAiCompletionsProvider {
         ctx: &Context,
         opts: &SimpleStreamOptions,
     ) -> AssistantMessageEventStream {
+        if let Some(stream) = reject_opaque_provider_options(model, &self.id) {
+            return stream;
+        }
         let (mut producer, stream) = create_assistant_message_event_stream();
         let http = self.http.clone();
         let provider_key = self.api_key.clone();

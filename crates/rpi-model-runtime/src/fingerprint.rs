@@ -244,7 +244,7 @@ mod tests {
     use rpi_ai::{Api, Model, StreamingProtocolCompat};
     use serde_json::json;
 
-    use super::{model_execution_fingerprint, ModelExecutionExclusion as Exclusion};
+    use super::{ModelExecutionExclusion as Exclusion, model_execution_fingerprint};
 
     /// Creates a model with stable public identifiers and typed metadata.
     fn model() -> Model {
@@ -282,9 +282,11 @@ mod tests {
         assert_eq!(original_fingerprint.api_id, "openai-completions");
         assert_ne!(original_fingerprint.sha256, changed_fingerprint.sha256);
         assert!(!original_fingerprint.complete);
-        assert!(original_fingerprint
-            .excluded_fields
-            .contains(&Exclusion::Endpoint));
+        assert!(
+            original_fingerprint
+                .excluded_fields
+                .contains(&Exclusion::Endpoint)
+        );
     }
 
     /// Excludes endpoints, auth headers, runtime options, and opaque values.

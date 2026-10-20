@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use indexmap::IndexMap;
 use rpi_ai::Model;
 use tokio::sync::broadcast;
 
@@ -27,7 +28,7 @@ struct ModelCatalogState {
     /// Last committed catalog revision.
     revision: u64,
     /// Models grouped by their host provider identity.
-    providers: BTreeMap<String, Vec<Model>>,
+    providers: IndexMap<String, Vec<Model>>,
 }
 
 /// Immutable catalog view captured at one revision.
@@ -35,7 +36,7 @@ struct ModelCatalogState {
 pub struct ModelCatalogSnapshot {
     /// Monotonic revision of the catalog state.
     pub revision: u64,
-    /// Models flattened in provider-id and per-provider order.
+    /// Models flattened in provider insertion and per-provider order.
     pub models: Vec<Model>,
 }
 
@@ -44,7 +45,7 @@ pub struct ModelCatalogSnapshot {
 pub struct ModelCatalogEvent {
     /// Revision available from a fresh snapshot.
     pub revision: u64,
-    /// Providers whose rows changed in this atomic catalog update.
+    /// Providers whose rows or relative snapshot order changed in this update.
     pub provider_ids: Vec<String>,
 }
 
@@ -111,24 +112,40 @@ impl ModelCatalog {
     /// # Returns
     /// The revision after applying the replacement.
     pub fn reconcile_providers(&self, providers: BTreeMap<String, Vec<Model>>) -> u64 {
+        self.reconcile_ordered_providers(providers.into_iter().collect())
+    }
+
+    /// Atomically reconciles provider rows while preserving the supplied order.
+    ///
+    /// Providers absent from `providers` are removed. The mapping is committed
+    /// as one revision and one notification.
+    ///
+    /// # Parameters
+    /// - `providers`: Complete provider model mapping in desired snapshot order.
+    ///
+    /// # Returns
+    /// The revision after applying the replacement.
+    pub fn reconcile_ordered_providers(&self, providers: IndexMap<String, Vec<Model>>) -> u64 {
         let mut state = self
             .inner
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let provider_ids = state
+        let mut provider_ids = state
             .providers
             .keys()
             .chain(providers.keys())
             .filter(|provider_id| state.providers.get(*provider_id) != providers.get(*provider_id))
             .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
+            .collect::<std::collections::BTreeSet<_>>();
+        if !state.providers.keys().eq(providers.keys()) {
+            provider_ids.extend(state.providers.keys().chain(providers.keys()).cloned());
+        }
         if provider_ids.is_empty() {
             return state.revision;
         }
 
+        let provider_ids = provider_ids.into_iter().collect::<Vec<_>>();
         state.providers = providers;
         state.revision = state.revision.saturating_add(1);
         let revision = state.revision;
@@ -137,6 +154,28 @@ impl ModelCatalog {
             provider_ids,
         });
         revision
+    }
+
+    /// Reconciles a flat provider/model list while preserving first-seen order.
+    ///
+    /// Models are grouped by their upstream provider identity. Provider order
+    /// follows the first occurrence in `models`, and each provider's model
+    /// order follows its occurrence order in that input.
+    ///
+    /// # Parameters
+    /// - `models`: Complete ordered model rows for the new catalog.
+    ///
+    /// # Returns
+    /// The revision after applying the replacement.
+    pub fn reconcile_models(&self, models: Vec<Model>) -> u64 {
+        let mut providers = IndexMap::<String, Vec<Model>>::new();
+        for model in models {
+            providers
+                .entry(model.provider.clone())
+                .or_default()
+                .push(model);
+        }
+        self.reconcile_ordered_providers(providers)
     }
 
     /// Removes a provider's models from the live catalog.
@@ -289,16 +328,16 @@ mod tests {
     #[tokio::test]
     async fn reconciliation_updates_and_removes_providers_atomically() {
         let catalog = ModelCatalog::new();
-        let mut initial = BTreeMap::new();
+        let mut initial = IndexMap::new();
         initial.insert("provider-a".to_owned(), vec![model("provider-a", "old-a")]);
         initial.insert("provider-b".to_owned(), vec![model("provider-b", "old-b")]);
-        catalog.reconcile_providers(initial);
+        catalog.reconcile_ordered_providers(initial);
         let mut updates = catalog.subscribe();
 
-        let mut refreshed = BTreeMap::new();
+        let mut refreshed = IndexMap::new();
         refreshed.insert("provider-a".to_owned(), vec![model("provider-a", "new-a")]);
         refreshed.insert("provider-c".to_owned(), vec![model("provider-c", "new-c")]);
-        let revision = catalog.reconcile_providers(refreshed);
+        let revision = catalog.reconcile_ordered_providers(refreshed);
         let event = updates.recv().await.expect("one reconciliation event");
         let snapshot = catalog.snapshot();
 
@@ -321,5 +360,57 @@ mod tests {
             updates.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    /// Verifies reconciliation preserves changed provider display order.
+    #[test]
+    fn reconciliation_updates_provider_order() {
+        let catalog = ModelCatalog::new();
+        let mut initial = IndexMap::new();
+        initial.insert("provider-b".to_owned(), vec![model("provider-b", "b")]);
+        initial.insert("provider-a".to_owned(), vec![model("provider-a", "a")]);
+        catalog.reconcile_ordered_providers(initial);
+        let mut updates = catalog.subscribe();
+
+        let mut reordered = IndexMap::new();
+        reordered.insert("provider-a".to_owned(), vec![model("provider-a", "a")]);
+        reordered.insert("provider-b".to_owned(), vec![model("provider-b", "b")]);
+        let revision = catalog.reconcile_ordered_providers(reordered);
+        let event = updates.try_recv().expect("provider order update event");
+
+        assert_eq!(revision, 2);
+        assert_eq!(event.revision, revision);
+        assert_eq!(event.provider_ids, ["provider-a", "provider-b"]);
+        assert_eq!(
+            catalog
+                .snapshot()
+                .models
+                .iter()
+                .map(|model| model.provider.as_str())
+                .collect::<Vec<_>>(),
+            ["provider-a", "provider-b"]
+        );
+    }
+
+    /// Keeps the original sorted-map caller shape source-compatible.
+    #[test]
+    fn reconciliation_accepts_legacy_btree_map_callers() {
+        let catalog = ModelCatalog::new();
+        let providers = std::collections::BTreeMap::from([
+            ("provider-b".to_owned(), vec![model("provider-b", "b")]),
+            ("provider-a".to_owned(), vec![model("provider-a", "a")]),
+        ]);
+
+        catalog.reconcile_providers(providers);
+
+        assert_eq!(
+            catalog
+                .snapshot()
+                .models
+                .iter()
+                .map(|model| model.provider.as_str())
+                .collect::<Vec<_>>(),
+            ["provider-a", "provider-b"]
+        );
     }
 }

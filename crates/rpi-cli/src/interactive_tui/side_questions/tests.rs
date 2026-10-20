@@ -60,7 +60,7 @@ impl Fixture {
         .await
         .unwrap();
         let (host, cell) = crate::extensions_actions::HarnessActionHost::new_empty(
-            vec![],
+            rpi_model_runtime::ModelCatalog::new(),
             std::env::temp_dir(),
             tokio::runtime::Handle::current(),
             Default::default(),

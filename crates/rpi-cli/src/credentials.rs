@@ -53,6 +53,7 @@ mod tests {
             models: vec![],
             api_key_env: Some("DEEPSEEK_API_KEY".into()),
             requires_auth: true,
+            provider_options_version: None,
         };
         let with_package = resolve("deepseek", None, &store, Some(&manifest));
         match previous {
@@ -78,6 +79,7 @@ mod tests {
             models: vec![],
             api_key_env: None,
             requires_auth: true,
+            provider_options_version: None,
         };
         let resolved = resolve("openai", None, &AuthStore::new(), Some(&manifest));
         match previous {
@@ -105,6 +107,7 @@ mod tests {
             models: vec![],
             api_key_env: None,
             requires_auth: true,
+            provider_options_version: None,
         };
         assert_eq!(
             resolve("gateway", Some(&config), &store, Some(&manifest)).source,

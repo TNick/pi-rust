@@ -74,6 +74,7 @@ use rpi_ai::providers::openai_responses::OpenAiResponsesProvider;
 use rpi_ai::{
     AssistantMessageEventStream, Context, Model, Provider, SimpleStreamOptions, ThinkingLevel,
 };
+use rpi_model_runtime::ModelCatalog;
 
 mod binding;
 mod factories;
@@ -778,6 +779,19 @@ pub fn authenticated_catalog(resolved: &ResolvedModel) -> Vec<Model> {
         .filter(|m| seen.insert((m.api.clone(), m.provider.clone(), m.id.to_ascii_lowercase())))
         .cloned()
         .collect()
+}
+
+/// Atomically reconciles authenticated model rows into the shared live catalog.
+///
+/// Rows are grouped by their provider identity while preserving each provider's
+/// input order. Providers absent from the new rows are removed by the same
+/// catalog revision.
+///
+/// # Parameters
+/// - `catalog`: Shared live catalog consumed by the TUI and runtime actions.
+/// - `models`: Complete authenticated model rows for the new catalog.
+pub fn reconcile_live_catalog(catalog: &ModelCatalog, models: Vec<Model>) {
+    catalog.reconcile_models(models);
 }
 
 /// Return the merged built-in + `models.json` catalog without requiring a
@@ -2370,6 +2384,49 @@ mod tests {
         assert!(!providers.contains("openai"));
         // Auth headers merged at build time survive into the selector catalog.
         assert!(catalog.iter().all(|m| m.headers.is_none()));
+    }
+
+    #[test]
+    fn live_catalog_reconcile_removes_providers_missing_from_refresh() {
+        let _env = TestEnv::new();
+        std::fs::write(
+            config::models_path().unwrap(),
+            r#"{
+  "providers": {
+    "gateway-a": {
+      "baseUrl": "https://a.example.com",
+      "api": "openai-completions",
+      "apiKey": "key-a",
+      "models": [ { "id": "model-a" } ]
+    },
+    "gateway-b": {
+      "baseUrl": "https://b.example.com",
+      "api": "openai-completions",
+      "apiKey": "key-b",
+      "models": [ { "id": "model-b" } ]
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let resolved = resolve(None, None, None, None, None).unwrap();
+        let rows = authenticated_catalog(&resolved);
+        let catalog = ModelCatalog::new();
+
+        reconcile_live_catalog(&catalog, rows.clone());
+        assert_eq!(catalog.snapshot().models, rows);
+
+        let retained = rows
+            .into_iter()
+            .find(|model| model.provider == "gateway-a")
+            .expect("gateway-a row");
+        reconcile_live_catalog(&catalog, vec![retained]);
+        let snapshot = catalog.snapshot();
+
+        assert_eq!(snapshot.models.len(), 1);
+        assert_eq!(snapshot.models[0].provider, "gateway-a");
+        assert!(catalog.provider_models("gateway-b").is_empty());
     }
 
     #[test]

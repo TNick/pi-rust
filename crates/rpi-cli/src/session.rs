@@ -47,6 +47,7 @@ use rpi_harness::types::{
     AgentHarnessOptions, AgentHarnessResources, AgentHarnessStreamOptions, DrivingMode,
     HarnessTool, HarnessToolExecution, ToolReplay,
 };
+use rpi_model_runtime::ModelCatalog;
 #[cfg(windows)]
 use rpi_tools::create_powershell_tool;
 use rpi_tools::{
@@ -195,6 +196,7 @@ pub fn default_session_dir(cwd: &Path) -> PathBuf {
 /// host remains unbound until the harness and authenticated catalog exist.
 pub struct PreparedExtensions {
     pub extension_session: ExtensionSession,
+    catalog: ModelCatalog,
     runtime: tokio::runtime::Handle,
     tool_context: rpi_extensions::ToolCallContext,
     action_host: Arc<crate::extensions_actions::HarnessActionHost>,
@@ -239,7 +241,7 @@ pub fn prepare_extensions(
     let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
         BuildError::HarnessCreate(format!("no tokio runtime for action bridge: {e}"))
     })?;
-    let catalog = Vec::new();
+    let catalog = ModelCatalog::new();
     let (action_host, harness_cell) = crate::extensions_actions::HarnessActionHost::new_empty(
         catalog.clone(),
         cwd.to_path_buf(),
@@ -296,6 +298,7 @@ pub fn prepare_extensions(
     }
     Ok(PreparedExtensions {
         runtime,
+        catalog,
         tool_context,
         action_host,
         harness_cell,
@@ -364,6 +367,7 @@ pub async fn build_prepared(
     let PreparedExtensions {
         runtime,
         tool_context,
+        catalog,
         action_host,
         harness_cell,
         reload_mailbox,
@@ -373,8 +377,8 @@ pub async fn build_prepared(
         action_bridge,
         extension_session,
     } = prepared;
-    let catalog = crate::provider::authenticated_catalog(resolved);
-    action_host.set_catalog(catalog.clone());
+    let model_rows = crate::provider::authenticated_catalog(resolved);
+    crate::provider::reconcile_live_catalog(&catalog, model_rows);
 
     // ---- Execution env + tools ----
     let env = Arc::new(OsExecutionEnv::with_cwd(cwd.to_path_buf()));
@@ -868,7 +872,7 @@ pub async fn build_prepared(
         extension_session: extension_session_cell,
         action_bridge: Arc::new(Mutex::new(Some(Arc::clone(&action_bridge)))),
         tool_context,
-        catalog: Arc::new(std::sync::RwLock::new(catalog)),
+        catalog,
         providers: Arc::new(std::sync::RwLock::new(resolved.providers.clone())),
         runtime: runtime.clone(),
         cwd: cwd.to_path_buf(),
@@ -1007,8 +1011,8 @@ pub struct ReloadContext {
     /// user bubble renders as usual.
     pub editor_text: rpi_extensions::EditorTextMailbox,
     /// Shared authenticated model catalog for runtime actions and the TUI.
-    /// Provider-package reloads replace it together with the runtime bindings.
-    pub catalog: Arc<std::sync::RwLock<Vec<rpi_ai::Model>>>,
+    /// Provider-package reloads reconcile its full provider mapping atomically.
+    pub catalog: ModelCatalog,
     /// Current configured provider runtimes. Replaced after package reload so
     /// subsequent reloads cannot recover stale plugin snapshots.
     pub providers: Arc<std::sync::RwLock<Vec<Arc<dyn Provider>>>>,
@@ -1252,10 +1256,7 @@ where
             // No prior bridge (no extensions ever loaded). Build a fresh host so
             // a reload that newly discovers plugins can still drive actions.
             let (action_host, _cell) = crate::extensions_actions::HarnessActionHost::new_empty(
-                ctx.catalog
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
+                ctx.catalog.clone(),
                 ctx.cwd.clone(),
                 ctx.runtime.clone(),
                 ctx.args.unknown_flags.clone(),
@@ -1595,9 +1596,6 @@ where
         fresh_bridge
             .clone_host()
             .replace_model_catalog(catalog.clone());
-        *ctx.catalog
-            .write()
-            .unwrap_or_else(|error| error.into_inner()) = catalog;
         // Refresh the public descriptor. Credentials remain in the newly bound
         // provider instances installed above and never enter the lane model.
         let _ = harness.lane("main").set_model(resolved.model.clone()).await;

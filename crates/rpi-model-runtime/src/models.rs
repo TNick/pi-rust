@@ -115,9 +115,10 @@ pub struct ModelDefinition {
     ///
     /// Unknown model-definition fields are retained here and passed to the
     /// runtime model without adding provider-specific fields to this crate.
-    /// Built-in adapters currently ignore this map; provider-specific request
-    /// builders must explicitly define and validate any supported keys.
-    /// Credential material and request headers must use their dedicated fields.
+    /// Built-in provider routes reject non-empty values unless an adapter adds
+    /// explicit handling. Extension providers must opt into a supported
+    /// versioned request envelope before receiving these values. Credential
+    /// material and request headers must use their dedicated fields.
     #[serde(flatten)]
     pub provider_options: BTreeMap<String, Value>,
 }
@@ -402,3 +403,7 @@ fn parse_input_modalities(input: Option<&[String]>) -> Vec<InputModality> {
         modalities
     }
 }
+
+#[cfg(test)]
+#[path = "models/provider_options_tests.rs"]
+mod provider_options_tests;

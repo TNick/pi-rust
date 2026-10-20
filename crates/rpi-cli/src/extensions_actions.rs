@@ -39,7 +39,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 
 use rpi_ai::types::ThinkingLevel;
 use rpi_extensions::RuntimeActionHost;
@@ -49,6 +49,7 @@ use rpi_harness::agent_harness::{
 use rpi_harness::session::session::Session;
 use rpi_harness::session::types::{BranchBounds, EntryOrder, EntryQuery};
 use rpi_harness::types::SendMessageOptions;
+use rpi_model_runtime::ModelCatalog;
 use tokio::runtime::Handle;
 
 use crate::session::{default_session_dir, open_session_by_id};
@@ -68,7 +69,7 @@ pub struct HarnessActionHost {
     harness: Arc<OnceLock<WeakAgentHarness>>,
     /// The auth-filtered catalog (the same list the TUI `/model` selector
     /// shows). `set_model(id)` resolves an id against this.
-    catalog: RwLock<Vec<rpi_ai::Model>>,
+    catalog: ModelCatalog,
     /// The session cwd — `new_session`/`fork`/`switch_session` need it to
     /// locate the session dir.
     cwd: PathBuf,
@@ -94,7 +95,7 @@ impl HarnessActionHost {
     /// created. Returns `(host, harness_cell)` where `harness_cell` is the
     /// shared `OnceLock` the caller fills.
     pub fn new_empty(
-        catalog: Vec<rpi_ai::Model>,
+        catalog: ModelCatalog,
         cwd: PathBuf,
         runtime: Handle,
         cli_flags: BTreeMap<String, serde_json::Value>,
@@ -104,7 +105,7 @@ impl HarnessActionHost {
         (
             Self {
                 harness: Arc::clone(&harness),
-                catalog: RwLock::new(catalog),
+                catalog,
                 cwd,
                 cli_flags,
                 tool_context,
@@ -114,13 +115,6 @@ impl HarnessActionHost {
             },
             harness,
         )
-    }
-
-    pub fn set_catalog(&self, catalog: Vec<rpi_ai::Model>) {
-        *self
-            .catalog
-            .write()
-            .unwrap_or_else(|error| error.into_inner()) = catalog;
     }
 
     /// Fill the harness cell. Call exactly once, immediately after
@@ -144,7 +138,7 @@ impl HarnessActionHost {
     /// Resolve `id` (case-insensitive exact, then substring) against the
     /// catalog. Mirrors the resolver's exact-id-first fallback.
     fn resolve_model(&self, id: &str) -> Option<rpi_ai::Model> {
-        let catalog = self.catalog.read().ok()?;
+        let catalog = self.catalog.snapshot().models;
         catalog
             .iter()
             .find(|m| m.id.eq_ignore_ascii_case(id))
@@ -383,7 +377,7 @@ impl RuntimeActionHost for HarnessActionHost {
         self.children.cancel_owner(owner);
     }
     fn replace_model_catalog(&self, models: Vec<rpi_ai::Model>) {
-        self.set_catalog(models);
+        crate::provider::reconcile_live_catalog(&self.catalog, models);
     }
     async fn get_execution_context(
         &self,

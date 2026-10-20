@@ -26,7 +26,9 @@ use crate::event_stream::{
     AssistantMessageEventStreamProducer,
 };
 use crate::model::{Model, StreamingProtocolCompat};
-use crate::provider::{CacheRetention, Provider, RequestSecret, SimpleStreamOptions};
+use crate::provider::{
+    reject_opaque_provider_options, CacheRetention, Provider, RequestSecret, SimpleStreamOptions,
+};
 use crate::types::{AssistantMessageEvent, Content, Context, DoneReason, StopReason, Usage};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -138,6 +140,9 @@ impl Provider for AnthropicProvider {
         ctx: &Context,
         opts: &SimpleStreamOptions,
     ) -> AssistantMessageEventStream {
+        if let Some(stream) = reject_opaque_provider_options(model, "anthropic") {
+            return stream;
+        }
         // `stream_simple` returns synchronously: create the stream, spawn the
         // producer task, hand back the consumer. Failures surface as `Error`
         // events on the stream, never as panics (plan §5.11). Mirrors the TS

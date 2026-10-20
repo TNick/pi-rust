@@ -7,25 +7,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 const REGISTRY: &str = "packages.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProjectPackage {
-    pub name: String,
-    pub version: String,
-    pub source: String,
-    pub cargo_package: String,
-    #[serde(default)]
-    pub artifacts: Vec<String>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct PackageRegistry {
-    #[serde(default)]
-    packages: Vec<ProjectPackage>,
-}
+pub use rpi_extensions::ProjectPackage;
+use rpi_extensions::ProjectPackageRegistry as PackageRegistry;
 
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
@@ -587,9 +574,8 @@ fn value(args: &[String], i: usize, flag: &str) -> Option<String> {
 fn read_registry(cwd: &Path) -> Result<PackageRegistry, String> {
     let path = cwd.join(".rpi").join(REGISTRY);
     match std::fs::read_to_string(path) {
-        Ok(s) => {
-            serde_json::from_str(&s).map_err(|e| format!("invalid project package registry: {e}"))
-        }
+        Ok(s) => PackageRegistry::from_json(&s)
+            .map_err(|error| format!("invalid project package registry: {error}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PackageRegistry::default()),
         Err(e) => Err(e.to_string()),
     }
@@ -606,10 +592,7 @@ fn write_registry(cwd: &Path, r: &PackageRegistry) -> Result<(), String> {
 pub fn project_package_dirs(cwd: &Path, kind: &str) -> Vec<PathBuf> {
     match read_registry(cwd) {
         Ok(registry) => rpi_extensions::package_resource_dirs(
-            registry
-                .packages
-                .into_iter()
-                .map(|package| cwd.join(".rpi/packages").join(package.name)),
+            registry.package_roots(cwd.join(".rpi").join("packages")),
             kind,
         ),
         Err(error) => {

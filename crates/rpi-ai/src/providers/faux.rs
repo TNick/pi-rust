@@ -10,7 +10,9 @@
 
 use crate::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 use crate::model::Model;
-use crate::provider::{DeferredProvider, Provider, SimpleStreamOptions};
+use crate::provider::{
+    reject_opaque_provider_options, DeferredProvider, Provider, SimpleStreamOptions,
+};
 use crate::types::{
     Api, AssistantMessage, AssistantMessageEvent, Content, Context, DeferredHandle, DoneReason,
     ErrorReason, InputModality, StopReason, TextContent, ThinkingContent, ToolCall,
@@ -481,6 +483,9 @@ impl Provider for FauxProvider {
         ctx: &Context,
         opts: &SimpleStreamOptions,
     ) -> crate::event_stream::AssistantMessageEventStream {
+        if let Some(stream) = reject_opaque_provider_options(model, &self.id) {
+            return stream;
+        }
         let (mut prod, stream) = create_assistant_message_event_stream();
 
         // Capture everything the producer task needs by value.

@@ -815,15 +815,10 @@ fn run_end_outcome_str(o: RunEndOutcome) -> &'static str {
 ///
 /// `event_rx` carries the live `AgentEvent` stream (drained by the TUI to
 /// render streaming responses). The REPL fallback ignores it.
-///
-/// `model_catalog` is the resolved provider's full model list, passed through
-/// so the TUI's `/model` selector can display available models (read-only —
-/// v1 does not switch models mid-session; see the initial port notes (retired)).
 pub async fn interactive(
     harness: &AgentHarness,
     event_rx: Option<tokio::sync::broadcast::Receiver<rpi_agent::AgentEvent>>,
     args: &Args,
-    model_catalog: Vec<rpi_ai::Model>,
     initial: Option<String>,
     extra_messages: &[String],
     initial_images: Vec<ImageContent>,
@@ -857,7 +852,6 @@ pub async fn interactive(
             harness,
             event_rx,
             args,
-            model_catalog,
             initial,
             extra_messages,
             initial_images,

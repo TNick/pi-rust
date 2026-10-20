@@ -32,6 +32,31 @@ pub struct ProviderManifest {
     pub api_key_env: Option<String>,
     #[serde(default = "requires_auth_default")]
     pub requires_auth: bool,
+    /// Version of the optional provider-specific request envelope supported by
+    /// this extension. Missing means the legacy request shape.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_provider_options_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub provider_options_version: Option<u32>,
+}
+
+/// Parses an explicitly supplied provider-options schema version.
+///
+/// # Parameters
+/// - `deserializer`: Serde input for a numeric version value.
+///
+/// # Returns
+/// The numeric version, rejecting `null` and other invalid schema values.
+///
+/// # Errors
+/// Returns a deserialization error when the value is not an unsigned integer.
+fn deserialize_provider_options_version<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <u32 as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 fn requires_auth_default() -> bool {
@@ -533,11 +558,11 @@ impl ExtensionRegistry {
         applied
     }
 
-    /// Parse a v3 `declare` JSON payload and apply it (P2). Recognised keys:
-    /// `priority` (integer), `platforms` (array of strings) and `ownsStdio`
-    /// (boolean; see [`ExtensionRegistry::declared_owns_stdio`]). Returns `true`
-    /// if the payload parsed as JSON (even with no recognised keys), `false` on
-    /// a parse error.
+    /// Parse a v3 `declare` JSON payload and apply it (P2). Recognised keys are
+    /// `priority`, `platforms`, `ownsStdio`, and provider manifests. Provider
+    /// manifests may opt into `providerOptionsVersion: 1`; unknown versions or
+    /// malformed manifests reject the declaration. Returns `true` when the
+    /// payload is valid, including when it has no recognized keys.
     pub fn apply_declaration_json(&mut self, json: &str) -> bool {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
             return false;
@@ -549,6 +574,9 @@ impl ExtensionRegistry {
             };
             if manifests.iter().any(|manifest| {
                 manifest.id.trim().is_empty()
+                    || manifest
+                        .provider_options_version
+                        .is_some_and(|version| version != 1)
                     || manifest
                         .models
                         .iter()
@@ -1305,6 +1333,7 @@ mod provider_manifest_tests {
             "packages require authentication by default"
         );
         assert_eq!(manifest.models[0].id, "first");
+        assert_eq!(manifest.provider_options_version, None);
         let mut second = ExtensionRegistry::new();
         second.register_provider(record());
         assert!(second.apply_declaration_json(&declaration("package", "second")));
@@ -1319,6 +1348,66 @@ mod provider_manifest_tests {
             "first"
         );
     }
+
+    /// Reads the provider-options version declared in a package manifest.
+    #[test]
+    fn provider_options_are_opted_in_through_the_declaration() {
+        let mut registry = ExtensionRegistry::new();
+        registry.register_provider(record());
+        let declaration = serde_json::json!({
+            "providers": [{
+                "id": "package",
+                "providerOptionsVersion": 1,
+                "models": [rpi_ai::Model::new(
+                    "model",
+                    "model",
+                    rpi_ai::Api::OpenaiCompletions,
+                    "package",
+                    "http://localhost"
+                )]
+            }]
+        });
+        assert!(registry.apply_declaration_json(&declaration.to_string()));
+        assert_eq!(
+            registry
+                .snapshot()
+                .provider_manifest("package")
+                .unwrap()
+                .provider_options_version,
+            Some(1)
+        );
+    }
+
+    /// Rejects provider-option schema versions the host does not implement.
+    #[test]
+    fn invalid_provider_options_versions_reject_declarations() {
+        for version in [
+            serde_json::json!(0),
+            serde_json::json!(2),
+            serde_json::json!("1"),
+            serde_json::Value::Null,
+        ] {
+            let mut registry = ExtensionRegistry::new();
+            registry.register_provider(record());
+            let declaration = serde_json::json!({
+                "providers": [{
+                    "id": "package",
+                    "providerOptionsVersion": version,
+                    "models": [rpi_ai::Model::new(
+                        "model",
+                        "model",
+                        rpi_ai::Api::OpenaiCompletions,
+                        "package",
+                        "http://localhost"
+                    )]
+                }]
+            });
+
+            assert!(!registry.apply_declaration_json(&declaration.to_string()));
+            assert!(registry.snapshot().provider_manifest("package").is_none());
+        }
+    }
+
     #[test]
     fn a_package_cannot_attach_a_catalog_to_another_providers_identity() {
         let mut registry = ExtensionRegistry::new();

@@ -60,7 +60,7 @@ async fn a_narrowed_child_cannot_reenter_the_root_host_through_an_alias_tool() {
     ]);
     let parent = parent(script).await;
     let (host, cell) = crate::extensions_actions::HarnessActionHost::new_empty(
-        vec![],
+        rpi_model_runtime::ModelCatalog::new(),
         std::env::temp_dir(),
         tokio::runtime::Handle::current(),
         Default::default(),

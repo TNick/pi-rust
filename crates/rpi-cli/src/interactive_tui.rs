@@ -71,6 +71,7 @@ use rpi_agent::{AgentEvent, AgentMessage};
 use rpi_ai::types::{AssistantMessage, Content, UserMessage};
 use rpi_harness::agent_harness::{AgentHarness, AgentLane, HarnessRunOutcome};
 use rpi_harness::session::types::{Entry, EntryOrder, EntryQuery};
+use rpi_model_runtime::ModelCatalog;
 use rpi_tui::scroll_view::{OverscrollMode, ScrollbarMode};
 #[cfg(test)]
 use rpi_tui::strip_ansi;
@@ -258,7 +259,7 @@ struct CommandContext {
     editor: Arc<Editor>,
     editor_container: Arc<Container>,
     lane: Arc<dyn AgentLane>,
-    model_catalog: Arc<std::sync::RwLock<Vec<rpi_ai::Model>>>,
+    model_catalog: ModelCatalog,
     cwd: std::path::PathBuf,
     /// Loaded resources for /context; refreshed after successful /reload.
     resources: Arc<Mutex<rpi_harness::types::AgentHarnessResources>>,
@@ -274,6 +275,16 @@ struct CommandContext {
     /// reads, export, or usage stats go through this instead of reaching into
     /// the harness directly, so the product surface is one object.
     session: Arc<crate::agent_session::AgentSession>,
+}
+
+impl CommandContext {
+    /// Capture one coherent model list for a selector operation.
+    ///
+    /// # Returns
+    /// Models from the latest shared catalog revision.
+    fn model_catalog(&self) -> Vec<rpi_ai::Model> {
+        self.model_catalog.snapshot().models
+    }
 }
 
 /// One slash command.
@@ -873,8 +884,6 @@ fn resolve_tui_startup_settings(
 /// [`crate::session::build`]); when `None` (e.g. a non-TUI caller reuses this
 /// fn), it falls back to a blocking, await-final-text path.
 ///
-/// `model_catalog` is the read-only catalog the `/model` selector displays.
-///
 /// This implementation mirrors the TypeScript `InteractiveMode` class:
 /// build the layout root once, drain `AgentEvent`s into UI mutations that
 /// mirror `handleEvent`, and dispatch keys from a `spawn_blocking` crossterm
@@ -884,7 +893,6 @@ pub async fn interactive_tui(
     harness: &AgentHarness,
     event_rx: Option<broadcast::Receiver<AgentEvent>>,
     args: &Args,
-    model_catalog: Vec<rpi_ai::Model>,
     initial: Option<String>,
     extra_messages: &[String],
     initial_images: Vec<rpi_ai::types::ImageContent>,
@@ -892,6 +900,8 @@ pub async fn interactive_tui(
     _no_themes: bool,
     reload_context: &crate::session::ReloadContext,
 ) -> i32 {
+    let model_catalog_arc = reload_context.catalog.clone();
+    let model_catalog = model_catalog_arc.snapshot().models;
     let lane: Arc<dyn AgentLane> = harness.lane("main");
     // Reuse the startup snapshot captured before provider/session setup. An
     // extension may mutate the process cwd while loading; that must not change
@@ -1283,7 +1293,6 @@ pub async fn interactive_tui(
 
     // Capture the model catalog + cwd for the selector builders + the key loop
     // (the callbacks fire on blocking threads and need owned data).
-    let model_catalog_arc = reload_context.catalog.clone();
 
     // ---- Layout root (built ONCE; mirrors TS fullscreenLayoutRoot) ----
     // root = VStack[ scrollview(basis:0 grow:1 shrink:1 min:1), dock(shrink:1) ]
@@ -1373,7 +1382,7 @@ pub async fn interactive_tui(
         .collect();
     let agent_session = Arc::new(crate::agent_session::AgentSession::new(
         harness.clone(),
-        model_catalog.clone(),
+        model_catalog_arc.clone(),
         scoped_models,
         cwd.clone(),
     ));
@@ -2332,11 +2341,7 @@ pub async fn interactive_tui(
                 rpi_tui::keybindings::keys::MODEL_CYCLE_BACKWARD,
             );
             if cycle_forward || cycle_backward {
-                let catalog = ctx_for_key
-                    .model_catalog
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone();
+                let catalog = ctx_for_key.model_catalog.snapshot().models;
                 let lane = lane_for_key.clone();
                 let state = state_for_key.clone();
                 let tui = tui_for_key.clone();
@@ -2363,10 +2368,7 @@ pub async fn interactive_tui(
                 rpi_tui::keybindings::keys::THINKING_CYCLE,
             ) {
                 let lane = lane_for_key.clone();
-                let catalog = model_catalog_for_key
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone();
+                let catalog = model_catalog_for_key.snapshot().models;
                 let state = state_for_key.clone();
                 tokio::spawn(async move {
                     let Ok(current_model) = lane.get_model().await else {
@@ -2836,11 +2838,7 @@ pub async fn interactive_tui(
             }
             Some(TuiMessage::SwitchProvider(input)) => {
                 let manifests = current_provider_manifests(&ctx.reload_context.extension_session);
-                let available = ctx
-                    .model_catalog
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone();
+                let available = ctx.model_catalog.snapshot().models;
                 match switch_provider(&input, &manifests, &available, &lane).await {
                     Ok((model, note)) => {
                         state.set_current_model(&model);

@@ -1169,6 +1169,16 @@ pub type RenderFn =
 /// borrowed request envelope; `out` is an owning response the plugin frees.
 /// The host wraps this into a `Provider` impl (B4/B5).
 ///
+/// The envelope contains `model`, `context`, and `options`. A provider receives
+/// `providerOptions: { version: 1, values: {...} }` only when its declaration
+/// opts in with `providerOptionsVersion: 1`; otherwise a request with non-empty
+/// provider-specific values fails before reaching the plugin. The field is
+/// omitted when empty. Providers should validate values they consume.
+/// `providerOptions` is runtime-only extension input, not a credential channel:
+/// never put credentials, authorization headers, or other secrets in it. Treat
+/// the existing `options` object as privileged input too: it may contain
+/// `apiKey` and headers, and must not be logged or persisted.
+///
 /// **One-shot.** The plugin returns the complete assistant message and the host
 /// emits it as a single terminal chunk (no progressive rendering). A provider
 /// that can stream should use [`ProviderStreamRequestFn`] via
@@ -1268,8 +1278,9 @@ pub type ProviderStreamEmitFn = extern "C" fn(event_json: StbString, user_data: 
 /// Same request envelope and final-response contract as [`ProviderRequestFn`],
 /// plus a per-chunk channel and the cancellation protocol:
 ///
-/// - `req_json` — borrowed `{ model, context, options }` envelope (never freed by
-///   the plugin).
+/// - `req_json` — borrowed provider request envelope (never freed by the
+///   plugin). It contains the fields documented on [`ProviderRequestFn`],
+///   including the optional versioned `providerOptions` object.
 /// - `emit` + `emit_user_data` — the host's per-chunk callback. `emit` is `None`
 ///   only if the host cannot accept chunks; a plugin then degrades to buffering
 ///   and returning the message through `out`. While the caller is cancelled the
@@ -1445,10 +1456,11 @@ pub struct PluginApi {
     pub user_data: *mut c_void,
 
     // --- declarations ---
-    /// Declare this plugin's host-side preferences as a JSON object, e.g.
-    /// `{"priority":60,"platforms":["linux","macos"]}`. Nullable: host does
-    /// not support declarations yet (plugin skips the call; host applies
-    /// defaults: priority `100`, all platforms).
+    /// Declare this plugin's host-side preferences and provider manifests as a
+    /// JSON object. A provider may opt into the v1 opaque-options request field
+    /// with `"providerOptionsVersion":1`; unsupported versions reject the
+    /// declaration. Nullable: when absent, host defaults apply and provider
+    /// manifests remain on the legacy request shape.
     pub declare: Option<extern "C" fn(json: StbStringRef) -> i32>,
 
     /// Register a system-prompt transformer for the run (pi's

@@ -417,7 +417,6 @@ async fn run_inner() -> i32 {
                 &harness,
                 Some(event_rx),
                 &parsed,
-                model_catalog,
                 initial.clone(),
                 &extra,
                 file_images.clone(),

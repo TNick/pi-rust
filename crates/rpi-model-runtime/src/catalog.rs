@@ -2,12 +2,12 @@
 
 use std::collections::BTreeMap;
 
+use rpi_ai::Model;
 use rpi_ai::providers::anthropic::models::anthropic_models;
 use rpi_ai::providers::openai_responses::openai_responses_models;
-use rpi_ai::Model;
 use rpi_extensions::ProviderManifest;
 
-use crate::models::{provider_to_models, ConfigValueResolver, ModelsConfig, ProviderConfig};
+use crate::models::{ConfigValueResolver, ModelsConfig, ProviderConfig, provider_to_models};
 /// Builds the model catalog from built-in providers, package manifests, and
 /// host configuration while applying package defaults in place.
 ///

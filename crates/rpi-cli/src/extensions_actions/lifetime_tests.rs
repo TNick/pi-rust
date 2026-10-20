@@ -3,10 +3,36 @@ use rpi_ai::providers::faux::{FauxProvider, FauxScript};
 use rpi_harness::types::AgentHarnessOptions;
 use serde_json::json;
 
+#[tokio::test]
+async fn action_host_observes_shared_catalog_refresh_and_provider_removal() {
+    let catalog = rpi_model_runtime::ModelCatalog::new();
+    let (host, _cell) = HarnessActionHost::new_empty(
+        catalog.clone(),
+        std::env::temp_dir(),
+        Handle::current(),
+        BTreeMap::new(),
+        rpi_extensions::ToolCallContext::default(),
+    );
+    let model = rpi_ai::Model::new(
+        "custom-model",
+        "Custom model",
+        rpi_ai::Api::OpenaiCompletions,
+        "provider-a",
+        "https://example.test/v1",
+    );
+
+    assert!(host.resolve_model("custom-model").is_none());
+    crate::provider::reconcile_live_catalog(&catalog, vec![model.clone()]);
+    assert_eq!(host.resolve_model("custom-model"), Some(model));
+
+    crate::provider::reconcile_live_catalog(&catalog, Vec::new());
+    assert!(host.resolve_model("custom-model").is_none());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_reverse_bindings_fail_closed_but_still_reclaim_their_children() {
     let (host, cell) = HarnessActionHost::new_empty(
-        vec![],
+        rpi_model_runtime::ModelCatalog::new(),
         std::env::temp_dir(),
         Handle::current(),
         BTreeMap::new(),

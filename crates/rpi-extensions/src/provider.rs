@@ -19,7 +19,9 @@
 //!   serializations of [`Model`](rpi_ai::Model)/[`Context`](rpi_ai::Context)
 //!   and `options` is a hand-built JSON of the [`SimpleStreamOptions`] fields
 //!   (that type is not `Serialize`; we mirror the field set
-//!   [`ExtensionProviderHooks`](crate::ExtensionProviderHooks) dispatches).
+//!   [`ExtensionProviderHooks`](crate::ExtensionProviderHooks) dispatches). A
+//!   non-empty `providerOptions` field is sent only to a provider whose
+//!   declaration opts into version 1; other providers fail closed.
 //! - **Response** (the plugin-owned `out` `StbString`): an
 //!   [`AssistantMessage`] JSON. The host reclaims `out` via the plugin's
 //!   `plugin_free_string` (traveled with the registration), parses the JSON, and
@@ -89,6 +91,7 @@ pub struct PluggableProvider {
     /// Captured at build time — `spawn_blocking` works from the async context.
     runtime: Handle,
     models: Vec<Model>,
+    provider_options_v1: bool,
 }
 
 impl PluggableProvider {
@@ -98,16 +101,19 @@ impl PluggableProvider {
         keepalive: Arc<PluginKeepalive>,
         runtime: Handle,
     ) -> Arc<Self> {
-        let models = snapshot
-            .provider_manifest(&record.provider_id)
+        let manifest = snapshot.provider_manifest(&record.provider_id);
+        let models = manifest
             .map(|manifest| manifest.models.clone())
             .unwrap_or_default();
+        let provider_options_v1 =
+            manifest.is_some_and(|manifest| manifest.provider_options_version == Some(1));
         Arc::new(Self {
             record,
             snapshot,
             _keepalive: keepalive,
             runtime,
             models,
+            provider_options_v1,
         })
     }
 
@@ -169,12 +175,27 @@ impl Provider for PluggableProvider {
         // `'static`. `SimpleStreamOptions` IS `Clone` (verified, provider.rs:27),
         // so a single clone carries every field into the task.
         let opts = opts.clone();
+        let provider_options_v1 = self.provider_options_v1;
 
         // `spawn` (not `spawn_blocking`) for the producer task — the producer
         // must be async so it can `await` the blocking ffi call. Inside, we
         // `spawn_blocking` the sync `request_fn` (the ffi call is blocking by
         // contract). This keeps the runtime worker free while the plugin runs.
         tokio::spawn(async move {
+            if !provider_options_v1 && !model.provider_options.is_empty() {
+                push_terminal(
+                    &mut prod,
+                    AssistantMessage::terminal(
+                        model.api.clone(),
+                        record.provider_id.clone(),
+                        model.id.clone(),
+                        rpi_ai::types::StopReason::Error,
+                        "extension provider does not declare providerOptions version 1",
+                        0,
+                    ),
+                );
+                return;
+            }
             if let Some(stream_fn) = record.stream_fn {
                 // Streaming provider: the plugin pushes per-chunk envelopes on
                 // the callback while its request fn is still running; the
@@ -226,15 +247,7 @@ async fn drive_plugin_provider(
         );
     }
 
-    // Build the request envelope JSON. `Model`/`Context` are Serialize;
-    // `SimpleStreamOptions` is not, so the `options` object is hand-built
-    // (mirrors `ExtensionProviderHooks::before_request`).
-    let request = serde_json::json!({
-        "model": serde_json::to_value(model).unwrap_or(serde_json::Value::Null),
-        "context": serde_json::to_value(ctx).unwrap_or(serde_json::Value::Null),
-        "options": options_json(opts),
-    });
-    let request_json = request.to_string();
+    let request_json = request_envelope_json(model, ctx, opts);
 
     // The fn pointers + user_data are `Copy`-able (fn ptrs) or plain raw (ud);
     // clone what spawn_blocking needs. `record` is `Clone` (owned strings).
@@ -937,15 +950,33 @@ fn api_from_style(style: &str) -> rpi_ai::types::Api {
         .unwrap_or_else(|_| rpi_ai::types::Api::Other(style.to_string()))
 }
 
-/// Build the `{ model, context, options }` request envelope shared by the
-/// one-shot and streaming provider paths.
+/// Build the provider request envelope shared by one-shot and streaming paths.
+///
+/// `providerOptions` is a separately versioned, provider-specific configuration
+/// object. It is omitted when empty and never enters serialized public model
+/// metadata.
 fn request_envelope_json(model: &Model, ctx: &Context, opts: &SimpleStreamOptions) -> String {
-    serde_json::json!({
-        "model": serde_json::to_value(model).unwrap_or(serde_json::Value::Null),
-        "context": serde_json::to_value(ctx).unwrap_or(serde_json::Value::Null),
-        "options": options_json(opts),
-    })
-    .to_string()
+    let mut request = serde_json::Map::from_iter([
+        (
+            "model".to_owned(),
+            serde_json::to_value(model).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "context".to_owned(),
+            serde_json::to_value(ctx).unwrap_or(serde_json::Value::Null),
+        ),
+        ("options".to_owned(), options_json(opts)),
+    ]);
+    if !model.provider_options.is_empty() {
+        request.insert(
+            "providerOptions".to_owned(),
+            serde_json::json!({
+                "version": 1,
+                "values": model.provider_options,
+            }),
+        );
+    }
+    serde_json::Value::Object(request).to_string()
 }
 
 /// Live accumulator for the chunks a streaming provider emits.
@@ -1350,6 +1381,214 @@ fn chunk_string(chunk: &serde_json::Value, field: &str) -> String {
 mod tests {
     use super::*;
     use crate::registry::ExtensionRegistry;
+
+    /// Provider model options reach extension providers through the versioned
+    /// request envelope while staying out of public model serialization.
+    #[test]
+    fn provider_options_use_versioned_extension_envelope() {
+        let mut model = Model::new(
+            "m",
+            "Model",
+            rpi_ai::types::Api::OpenaiCompletions,
+            "provider",
+            "https://example.test",
+        );
+        let empty_request: serde_json::Value = serde_json::from_str(&request_envelope_json(
+            &model,
+            &Context::new(vec![]),
+            &SimpleStreamOptions::default(),
+        ))
+        .expect("empty provider request envelope");
+        assert!(empty_request.get("providerOptions").is_none());
+
+        model
+            .provider_options
+            .insert("reasoning_effort".to_string(), serde_json::json!("high"));
+        model.provider_options.insert(
+            "reasoning_budget".to_string(),
+            serde_json::json!("opaque-secret-sentinel"),
+        );
+
+        let public_model = serde_json::to_value(&model).expect("public model JSON");
+        let request: serde_json::Value = serde_json::from_str(&request_envelope_json(
+            &model,
+            &Context::new(vec![]),
+            &SimpleStreamOptions::default(),
+        ))
+        .expect("provider request envelope");
+
+        assert!(public_model.get("providerOptions").is_none());
+        assert!(!format!("{model:?}").contains("opaque-secret-sentinel"));
+        assert_eq!(request["providerOptions"]["version"], 1);
+        assert_eq!(
+            request["providerOptions"]["values"]["reasoning_effort"],
+            "high"
+        );
+        assert_eq!(
+            request["providerOptions"]["values"]["reasoning_budget"],
+            "opaque-secret-sentinel"
+        );
+    }
+
+    /// A callback state used to verify manifest-gated provider requests.
+    #[derive(Default)]
+    struct ProviderOptionsProbe {
+        /// Number of times the plugin callback was invoked.
+        calls: std::sync::atomic::AtomicUsize,
+        /// Request envelope received by the callback.
+        request: Mutex<Option<String>>,
+    }
+
+    /// Captures the request envelope and returns a valid assistant message.
+    extern "C" fn capture_provider_options_request(
+        request: StbStringRef,
+        out: *mut StbString,
+        user_data: *mut c_void,
+    ) -> i32 {
+        // SAFETY: the test keeps the probe alive until the provider stream ends.
+        let probe = unsafe { &*user_data.cast::<ProviderOptionsProbe>() };
+        // SAFETY: the host passes a valid borrowed request for this callback.
+        let request = unsafe { request.as_str() };
+        probe.calls.fetch_add(1, Ordering::AcqRel);
+        *probe.request.lock().unwrap() = Some(request.to_owned());
+        let response = r#"{"role":"assistant","content":[{"type":"text","text":"ok"}],"api":"faux","provider":"pluggy","model":"m","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},"stopReason":"stop","timestamp":0}"#;
+        // SAFETY: the host supplies the writable output slot for this callback.
+        unsafe {
+            *out = StbString::from_string(response.to_owned());
+        }
+        0
+    }
+
+    /// Creates a registered provider snapshot with optional v1 declaration.
+    fn provider_options_snapshot(version: Option<u32>) -> Arc<RegistrySnapshot> {
+        let mut registry = ExtensionRegistry::new();
+        let mut declaration = serde_json::json!({
+            "providers": [{
+                "id": "pluggy",
+                "models": [Model::new(
+                    "m",
+                    "Model",
+                    rpi_ai::types::Api::Faux,
+                    "pluggy",
+                    "https://example.test"
+                )]
+            }]
+        });
+        if let Some(version) = version {
+            declaration["providers"][0]["providerOptionsVersion"] = serde_json::json!(version);
+        }
+        assert!(registry.apply_declaration_json(&declaration.to_string()));
+        registry.register_provider(RegisteredProvider {
+            provider_id: "pluggy".to_owned(),
+            base_url: "https://example.test".to_owned(),
+            api_style: "faux".to_owned(),
+            request_fn: capture_provider_options_request,
+            stream_fn: None,
+            plugin_free_string: stub_free,
+            user_data: std::ptr::null_mut(),
+        });
+        Arc::new(registry.snapshot())
+    }
+
+    /// Enforces opt-in before callback and forwards options after v1 opt-in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn provider_options_require_manifest_opt_in_at_runtime() {
+        let runtime = Handle::current();
+        let context = Context::new(vec![]);
+        let options = SimpleStreamOptions::default();
+        let model = Model::new(
+            "m",
+            "Model",
+            rpi_ai::types::Api::Faux,
+            "pluggy",
+            "https://example.test",
+        );
+        let legacy_probe = Arc::new(ProviderOptionsProbe::default());
+        let legacy_provider = PluggableProvider::new(
+            RegisteredProvider {
+                provider_id: "pluggy".to_owned(),
+                base_url: "https://example.test".to_owned(),
+                api_style: "faux".to_owned(),
+                request_fn: capture_provider_options_request,
+                stream_fn: None,
+                plugin_free_string: stub_free,
+                user_data: Arc::as_ptr(&legacy_probe) as *mut c_void,
+            },
+            provider_options_snapshot(None),
+            PluginKeepalive::empty(),
+            runtime.clone(),
+        );
+        let mut legacy_empty_stream = legacy_provider
+            .stream_simple(&model, &context, &options)
+            .await;
+        let legacy_empty_terminal = legacy_empty_stream
+            .next()
+            .await
+            .expect("legacy empty success terminal");
+        assert!(matches!(
+            legacy_empty_terminal,
+            AssistantMessageEvent::Done { .. }
+        ));
+        assert_eq!(legacy_probe.calls.load(Ordering::Acquire), 1);
+        let legacy_empty_request = legacy_probe
+            .request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("legacy empty request envelope");
+        let legacy_empty_request: serde_json::Value =
+            serde_json::from_str(&legacy_empty_request).expect("legacy request JSON");
+        assert!(legacy_empty_request.get("providerOptions").is_none());
+
+        let mut model_with_options = model.clone();
+        model_with_options
+            .provider_options
+            .insert("reasoning_effort".to_owned(), serde_json::json!("high"));
+        let mut legacy_stream = legacy_provider
+            .stream_simple(&model_with_options, &context, &options)
+            .await;
+        let legacy_terminal = legacy_stream.next().await.expect("error terminal");
+        assert!(matches!(
+            legacy_terminal,
+            AssistantMessageEvent::Error { .. }
+        ));
+        assert_eq!(legacy_probe.calls.load(Ordering::Acquire), 1);
+
+        let opted_probe = Arc::new(ProviderOptionsProbe::default());
+        let opted_provider = PluggableProvider::new(
+            RegisteredProvider {
+                provider_id: "pluggy".to_owned(),
+                base_url: "https://example.test".to_owned(),
+                api_style: "faux".to_owned(),
+                request_fn: capture_provider_options_request,
+                stream_fn: None,
+                plugin_free_string: stub_free,
+                user_data: Arc::as_ptr(&opted_probe) as *mut c_void,
+            },
+            provider_options_snapshot(Some(1)),
+            PluginKeepalive::empty(),
+            runtime,
+        );
+        let mut opted_stream = opted_provider
+            .stream_simple(&model_with_options, &context, &options)
+            .await;
+        let opted_terminal = opted_stream.next().await.expect("success terminal");
+        assert!(matches!(opted_terminal, AssistantMessageEvent::Done { .. }));
+        assert_eq!(opted_probe.calls.load(Ordering::Acquire), 1);
+        let request = opted_probe
+            .request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("plugin request envelope");
+        let request: serde_json::Value =
+            serde_json::from_str(&request).expect("valid provider request JSON");
+        assert_eq!(request["providerOptions"]["version"], 1);
+        assert_eq!(
+            request["providerOptions"]["values"]["reasoning_effort"],
+            "high"
+        );
+    }
 
     rpi_plugin_sdk::string_handler! {
         /// A stub `ProviderRequestFn` that writes a minimal assistant-message JSON

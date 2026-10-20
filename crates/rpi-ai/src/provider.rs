@@ -3,18 +3,46 @@
 //! provider's wire format directly; it calls `stream_simple` and consumes the
 //! returned [`AssistantMessageEventStream`].
 
-use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEventStream,
-};
+use crate::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 use crate::model::Model;
 use crate::types::{
-    AssistantMessage, AssistantMessageEvent, Context, DeferredHandle, ErrorReason,
-    ThinkingBudgets, ThinkingLevel, StopReason,
+    AssistantMessage, AssistantMessageEvent, Context, DeferredHandle, ErrorReason, StopReason,
+    ThinkingBudgets, ThinkingLevel,
 };
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// Rejects opaque options unless a provider defines explicit handling.
+///
+/// # Parameters
+/// - `model`: Model whose opaque provider options may be unsupported.
+/// - `provider_id`: Identity of the provider receiving the request.
+///
+/// # Returns
+/// An error stream when options are present, otherwise `None`.
+pub(crate) fn reject_opaque_provider_options(
+    model: &Model,
+    provider_id: &str,
+) -> Option<AssistantMessageEventStream> {
+    if model.provider_options.is_empty() {
+        return None;
+    }
+    let (mut producer, stream) = create_assistant_message_event_stream();
+    producer.push(AssistantMessageEvent::Error {
+        reason: ErrorReason::Error,
+        error: AssistantMessage::terminal(
+            model.api.clone(),
+            provider_id,
+            model.id.clone(),
+            StopReason::Error,
+            "provider does not support opaque model options",
+            0,
+        ),
+    });
+    Some(stream)
+}
 
 /// Default deadline for one LLM API request, including its streamed response.
 pub const DEFAULT_LLM_API_TIMEOUT: Duration = Duration::from_secs(600);
@@ -78,12 +106,14 @@ pub struct SimpleStreamOptions {
 impl fmt::Debug for SimpleStreamOptions {
     /// Formats safe request options while redacting keys and header values.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let header_names = self.headers.as_ref().map(|headers| {
-            headers.keys().map(String::as_str).collect::<Vec<_>>()
-        });
-        let metadata_names = self.metadata.as_ref().map(|metadata| {
-            metadata.keys().map(String::as_str).collect::<Vec<_>>()
-        });
+        let header_names = self
+            .headers
+            .as_ref()
+            .map(|headers| headers.keys().map(String::as_str).collect::<Vec<_>>());
+        let metadata_names = self
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.keys().map(String::as_str).collect::<Vec<_>>());
         formatter
             .debug_struct("SimpleStreamOptions")
             .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
