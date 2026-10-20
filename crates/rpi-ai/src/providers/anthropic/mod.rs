@@ -26,7 +26,7 @@ use crate::event_stream::{
     AssistantMessageEventStreamProducer,
 };
 use crate::model::{Model, StreamingProtocolCompat};
-use crate::provider::{CacheRetention, Provider, SimpleStreamOptions};
+use crate::provider::{CacheRetention, Provider, RequestSecret, SimpleStreamOptions};
 use crate::types::{AssistantMessageEvent, Content, Context, DoneReason, StopReason, Usage};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -157,6 +157,7 @@ impl Provider for AnthropicProvider {
                 http,
                 provider_key,
                 allow_env_api_key,
+                None,
                 &model,
                 &ctx,
                 &opts,
@@ -164,6 +165,52 @@ impl Provider for AnthropicProvider {
             .await;
             // `prod` drops here, closing the mpsc sender so the consumer's
             // `next()` returns `None` after the terminal event.
+        });
+
+        stream
+    }
+
+    /// Streams one API-key request using host-protected credential material.
+    ///
+    /// Bearer credentials are rejected because the current Anthropic request
+    /// path does not implement the associated OAuth request semantics.
+    ///
+    /// # Parameters
+    /// - `model`: Anthropic model receiving the request.
+    /// - `ctx`: Provider-neutral request context.
+    /// - `opts`: Non-secret request options.
+    /// - `secret`: Host-protected API key, exposed only while building headers.
+    /// - `bearer`: Whether the credential requires bearer/OAuth semantics.
+    ///
+    /// # Returns
+    /// The asynchronous Anthropic response event stream.
+    async fn stream_simple_with_request_secret(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+    ) -> AssistantMessageEventStream {
+        let (mut prod, stream) = create_assistant_message_event_stream();
+        let http = self.http.clone();
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let opts = opts.clone();
+        let secret = secret.clone();
+
+        tokio::spawn(async move {
+            run_anthropic_stream(
+                &mut prod,
+                http,
+                None,
+                false,
+                Some((secret, bearer)),
+                &model,
+                &ctx,
+                &opts,
+            )
+            .await;
         });
 
         stream
@@ -186,11 +233,22 @@ impl Provider for AnthropicProvider {
 /// this function and lets `build_params` read `SimpleStreamOptions` directly
 /// (the adaptive-vs-budget thinking decision lives there), so there is no
 /// intermediate options shape.
+///
+/// # Parameters
+/// - `prod`: Event-stream producer for this provider invocation.
+/// - `http`: HTTP client configured by the provider host.
+/// - `provider_key`: Legacy provider-owned API key.
+/// - `allow_env_api_key`: Whether legacy resolution may read the env key.
+/// - `request_secret`: Optional host-protected credential and auth mode.
+/// - `model`: Model descriptor for this invocation.
+/// - `ctx`: Provider-neutral request context.
+/// - `opts`: Non-secret request options.
 async fn run_anthropic_stream(
     prod: &mut AssistantMessageEventStreamProducer,
     http: reqwest::Client,
     provider_key: Option<String>,
     allow_env_api_key: bool,
+    request_secret: Option<(RequestSecret, bool)>,
     model: &Model,
     ctx: &Context,
     opts: &SimpleStreamOptions,
@@ -203,7 +261,37 @@ async fn run_anthropic_stream(
     );
 
     // ---- resolve auth (assertRequestAuth) ----
-    let resolved_key = resolve_api_key(&provider_key, opts, allow_env_api_key);
+    let protected_secret = match request_secret {
+        Some((_, true)) => {
+            emit_terminal_error(
+                prod,
+                &mut state,
+                "Anthropic protected bearer credentials are unsupported".into(),
+                false,
+            );
+            return;
+        }
+        Some((secret, false)) => {
+            let mut present = false;
+            secret.with_secret(&mut |value| present = !value.trim().is_empty());
+            if !present {
+                emit_terminal_error(
+                    prod,
+                    &mut state,
+                    "Protected provider credential is empty".into(),
+                    false,
+                );
+                return;
+            }
+            Some(secret)
+        }
+        None => None,
+    };
+    let resolved_key = if protected_secret.is_some() {
+        None
+    } else {
+        resolve_api_key(&provider_key, opts, allow_env_api_key)
+    };
     // TS `assertRequestAuth(model.provider, options?.apiKey, options?.headers)`
     // checks `options.headers` alone — but upstream the model-resolution layer
     // has *already merged* `model.headers` into `options.headers` (models.ts
@@ -214,14 +302,18 @@ async fn run_anthropic_stream(
     // `model.headers` (the `ANTHROPIC_AUTH_TOKEN` / `models.json authHeader:true`
     // paths in rpi-cli's `provider::resolve`) authenticate without an `x-api-key`.
     let header_owned_auth = has_header_auth(&opts.headers) || has_header_auth(&model.headers);
-    let api_key_for_header = match (resolved_key, header_owned_auth) {
-        (Some(k), _) => Some(k),
-        (None, true) => None, // headers carry auth; do not send x-api-key.
-        (None, false) => {
-            // Mirrors `assertRequestAuth`'s `throw new Error("No API key for…")`.
-            let msg = format!("No API key for provider: {}", model.provider);
-            emit_terminal_error(prod, &mut state, msg, false);
-            return;
+    let api_key_for_header = if protected_secret.is_some() {
+        None
+    } else {
+        match (resolved_key, header_owned_auth) {
+            (Some(k), _) => Some(k),
+            (None, true) => None, // headers carry auth; do not send x-api-key.
+            (None, false) => {
+                // Mirrors `assertRequestAuth`'s missing-key failure.
+                let msg = format!("No API key for provider: {}", model.provider);
+                emit_terminal_error(prod, &mut state, msg, false);
+                return;
+            }
         }
     };
 
@@ -247,12 +339,16 @@ async fn run_anthropic_stream(
     }
 
     // ---- assemble headers (createClient, API-key arm) ----
-    let headers = assemble_headers(
-        model,
-        opts,
-        built.beta_header.as_deref(),
-        api_key_for_header.as_deref(),
-    );
+    let headers = if protected_secret.is_some() {
+        assemble_protected_headers(model, opts, built.beta_header.as_deref())
+    } else {
+        assemble_headers(
+            model,
+            opts,
+            built.beta_header.as_deref(),
+            api_key_for_header.as_deref(),
+        )
+    };
 
     let url = format!("{}/v1/messages", model.base_url.trim_end_matches('/'));
     let timeout = opts.request_timeout();
@@ -272,20 +368,46 @@ async fn run_anthropic_stream(
             let url = url.clone();
             let headers = headers.clone();
             let signal = signal.clone();
+            let protected_secret = protected_secret.clone();
             async move {
                 let mut req = http.post(&url).timeout(timeout);
                 for (k, v) in &headers {
                     req = req.header(k.as_str(), v.as_str());
                 }
+                if signal.is_cancelled() {
+                    return Err(AiError::Abort {
+                        message: "Request aborted".to_string(),
+                    });
+                }
+                if let Some(secret) = protected_secret {
+                    let mut auth_header = None;
+                    secret.with_secret(&mut |value| {
+                        if !value.trim().is_empty() {
+                            if let Ok(mut header) =
+                                reqwest::header::HeaderValue::from_bytes(value.as_bytes())
+                            {
+                                header.set_sensitive(true);
+                                auth_header = Some(header);
+                            }
+                        }
+                    });
+                    let Some(auth_header) = auth_header else {
+                        return Err(AiError::Auth {
+                            message: "invalid protected provider credential".into(),
+                        });
+                    };
+                    req = req.header("x-api-key", auth_header);
+                }
                 let send_fut = req.json(&body).send();
                 let resp = tokio::select! {
+                    biased;
+                    _ = signal.cancelled() => return Err(AiError::Abort {
+                        message: "Request aborted".to_string(),
+                    }),
                     r = send_fut => r.map_err(|e| AiError::Http {
                         status: None,
                         message: format!("http transport error: {e}"),
                     })?,
-                    _ = signal.cancelled() => return Err(AiError::Abort {
-                        message: "Request aborted".to_string(),
-                    }),
                 };
                 let status = resp.status();
                 if !status.is_success() {
@@ -539,11 +661,41 @@ fn has_header_auth(headers: &Option<std::collections::BTreeMap<String, String>>)
 /// `model.headers` and `opts.headers` merged (later wins). `x-api-key` is
 /// applied LAST so caller headers cannot clobber the resolved key (the SDK
 /// attaches it out-of-band from `defaultHeaders`).
+///
+/// # Parameters
+/// - `model`: Model supplying endpoint defaults and headers.
+/// - `opts`: Request options supplying caller headers and session affinity.
+/// - `beta_header`: Optional beta feature header from the built request.
+/// - `api_key`: Optional resolved API key to attach last.
+///
+/// # Returns
+/// The merged Anthropic request headers.
 fn assemble_headers(
     model: &Model,
     opts: &SimpleStreamOptions,
     beta_header: Option<&str>,
     api_key: Option<&str>,
+) -> Vec<(String, String)> {
+    assemble_headers_with_auth_filter(model, opts, beta_header, api_key, false)
+}
+
+/// Assembles Anthropic headers with optional filtering before value cloning.
+///
+/// # Parameters
+/// - `model`: Model supplying endpoint and default headers.
+/// - `opts`: Request options supplying caller headers and session affinity.
+/// - `beta_header`: Optional beta feature header from the built request.
+/// - `api_key`: Optional resolved API key to attach last.
+/// - `filter_auth`: Whether caller-provided credential headers are excluded.
+///
+/// # Returns
+/// Request headers, optionally excluding auth-owned names.
+fn assemble_headers_with_auth_filter(
+    model: &Model,
+    opts: &SimpleStreamOptions,
+    beta_header: Option<&str>,
+    api_key: Option<&str>,
+    filter_auth: bool,
 ) -> Vec<(String, String)> {
     let mut headers: Vec<(String, String)> = Vec::new();
     headers.push(("accept".into(), "application/json".into()));
@@ -585,12 +737,16 @@ fn assemble_headers(
     // model.headers then opts.headers (later wins). Mirrors `mergeHeaders`.
     if let Some(model_headers) = &model.headers {
         for (k, v) in model_headers {
-            merge_header(&mut headers, k.clone(), v.clone());
+            if !filter_auth || !is_protected_auth_header(k) {
+                merge_header(&mut headers, k.clone(), v.clone());
+            }
         }
     }
     if let Some(opt_headers) = &opts.headers {
         for (k, v) in opt_headers {
-            merge_header(&mut headers, k.clone(), v.clone());
+            if !filter_auth || !is_protected_auth_header(k) {
+                merge_header(&mut headers, k.clone(), v.clone());
+            }
         }
     }
 
@@ -606,6 +762,42 @@ fn assemble_headers(
     }
 
     headers
+}
+
+/// Assembles Anthropic headers while excluding caller-provided credentials.
+///
+/// # Parameters
+/// - `model`: Model supplying endpoint and default headers.
+/// - `opts`: Request options supplying caller headers and session affinity.
+/// - `beta_header`: Optional beta feature header from the built request.
+///
+/// # Returns
+/// Request headers without auth-owned names, for protected auth injection.
+fn assemble_protected_headers(
+    model: &Model,
+    opts: &SimpleStreamOptions,
+    beta_header: Option<&str>,
+) -> Vec<(String, String)> {
+    assemble_headers_with_auth_filter(model, opts, beta_header, None, true)
+}
+
+/// Identifies caller-provided credentials superseded by protected auth.
+///
+/// # Parameters
+/// - `name`: Header name to inspect.
+///
+/// # Returns
+/// Whether the header carries a credential that must not be sent.
+fn is_protected_auth_header(name: &str) -> bool {
+    [
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "cf-aig-authorization",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 /// Insert-or-replace a header by lowercase name. Mirrors TS `mergeHeaders` /

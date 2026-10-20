@@ -15,7 +15,7 @@ use crate::event_stream::{
     AssistantMessageEventStreamProducer,
 };
 use crate::model::{MaxTokensField, Model, StreamingProtocolCompat};
-use crate::provider::{Provider, SimpleStreamOptions};
+use crate::provider::{Provider, RequestSecret, SimpleStreamOptions};
 use crate::providers::anthropic::cost::calculate_cost;
 use crate::providers::anthropic::json_parse::parse_streaming_json;
 use crate::providers::anthropic::retry::retry_provider_request;
@@ -27,6 +27,7 @@ use crate::types::{
     ToolCall, ToolCallType, Usage, UserContent,
 };
 use crate::AiError;
+use zeroize::Zeroizing;
 
 /// Provider for OpenAI's streaming Chat Completions wire protocol.
 pub struct OpenAiCompletionsProvider {
@@ -120,6 +121,52 @@ impl Provider for OpenAiCompletionsProvider {
                 provider_key,
                 allow_env_api_key,
                 require_auth,
+                None,
+                &model,
+                &ctx,
+                &opts,
+            )
+            .await;
+        });
+
+        stream
+    }
+
+    /// Streams with host-protected credentials without copying them into options.
+    ///
+    /// # Parameters
+    /// - `model`: OpenAI-compatible model receiving the request.
+    /// - `ctx`: Provider-neutral request context.
+    /// - `opts`: Non-secret request options.
+    /// - `secret`: Host-protected API key, exposed only while building headers.
+    /// - `bearer`: Selects Bearer authorization when true, otherwise `x-api-key`.
+    ///
+    /// # Returns
+    /// The asynchronous OpenAI-compatible response event stream.
+    async fn stream_simple_with_request_secret(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+    ) -> AssistantMessageEventStream {
+        let (mut producer, stream) = create_assistant_message_event_stream();
+        let http = self.http.clone();
+        let require_auth = self.require_auth;
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let opts = opts.clone();
+        let secret = secret.clone();
+
+        tokio::spawn(async move {
+            run_stream(
+                &mut producer,
+                http,
+                None,
+                false,
+                require_auth,
+                Some((secret, bearer)),
                 &model,
                 &ctx,
                 &opts,
@@ -131,30 +178,74 @@ impl Provider for OpenAiCompletionsProvider {
     }
 }
 
+/// Runs an OpenAI-compatible request and forwards normalized response events.
+///
+/// # Parameters
+/// - `producer`: Event-stream producer for this provider invocation.
+/// - `http`: HTTP client configured by the provider.
+/// - `provider_key`: Legacy provider-owned API key.
+/// - `allow_env_api_key`: Whether legacy resolution may read the env key.
+/// - `require_auth`: Whether this provider requires an authentication header.
+/// - `request_secret`: Optional host-protected credential and header mode.
+/// - `model`: Model descriptor for this invocation.
+/// - `ctx`: Provider-neutral request context.
+/// - `opts`: Non-secret request options.
 async fn run_stream(
     producer: &mut AssistantMessageEventStreamProducer,
     http: reqwest::Client,
     provider_key: Option<String>,
     allow_env_api_key: bool,
     require_auth: bool,
+    request_secret: Option<(RequestSecret, bool)>,
     model: &Model,
     ctx: &Context,
     opts: &SimpleStreamOptions,
 ) {
     let mut state = StreamState::new(model);
-    let api_key = resolve_api_key(&provider_key, opts, allow_env_api_key);
+    let protected_secret = match request_secret {
+        Some((secret, bearer)) => {
+            let mut present = false;
+            secret.with_secret(&mut |value| present = !value.trim().is_empty());
+            if !present {
+                state.error(
+                    producer,
+                    "Protected provider credential is empty".into(),
+                    false,
+                );
+                return;
+            }
+            Some((secret, bearer))
+        }
+        None => None,
+    };
+    let api_key = if protected_secret.is_some() {
+        None
+    } else {
+        resolve_api_key(&provider_key, opts, allow_env_api_key)
+    };
 
-    let mut headers = model.headers.clone().unwrap_or_default();
-    if let Some(extra) = &opts.headers {
-        for (name, value) in extra {
-            headers.insert(name.clone(), value.clone());
+    let mut headers = BTreeMap::new();
+    if let Some(model_headers) = &model.headers {
+        for (name, value) in model_headers {
+            if protected_secret.is_none() || !is_protected_auth_header(name) {
+                headers.insert(name.clone(), value.clone());
+            }
         }
     }
-    apply_api_key(&mut headers, api_key);
+    if let Some(extra) = &opts.headers {
+        for (name, value) in extra {
+            if protected_secret.is_none() || !is_protected_auth_header(name) {
+                headers.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    if protected_secret.is_none() {
+        apply_api_key(&mut headers, api_key);
+    }
     // Identify rpi on provider requests (native `getPiUserAgent`), unless the
     // caller/model already set a User-Agent.
     crate::http::ensure_user_agent(&mut headers);
-    if require_auth && !has_auth_header(&headers) {
+    if require_auth && !has_auth_header(&headers) && protected_secret.is_none() {
         state.error(
             producer,
             format!("No API key for provider: {}", model.provider),
@@ -176,19 +267,52 @@ async fn run_stream(
             let body = body.clone();
             let headers = headers.clone();
             let signal = signal.clone();
+            let protected_secret = protected_secret.clone();
             async move {
                 let mut request = http.post(&url).timeout(timeout);
                 for (name, value) in headers {
                     request = request.header(name, value);
                 }
+                if signal.is_cancelled() {
+                    return Err(AiError::Abort {
+                        message: "Request aborted".into(),
+                    });
+                }
+                if let Some((secret, bearer)) = protected_secret {
+                    let mut auth_header = None;
+                    secret.with_secret(&mut |value| {
+                        if value.trim().is_empty() {
+                            return;
+                        }
+                        let mut bytes = Zeroizing::new(Vec::with_capacity(value.len() + 7));
+                        let name = if bearer {
+                            bytes.extend_from_slice(b"Bearer ");
+                            "authorization"
+                        } else {
+                            "x-api-key"
+                        };
+                        bytes.extend_from_slice(value.as_bytes());
+                        if let Ok(mut header) = reqwest::header::HeaderValue::from_bytes(&bytes) {
+                            header.set_sensitive(true);
+                            auth_header = Some((name, header));
+                        }
+                    });
+                    let Some((name, header)) = auth_header else {
+                        return Err(AiError::Auth {
+                            message: "invalid protected provider credential".into(),
+                        });
+                    };
+                    request = request.header(name, header);
+                }
                 let response = tokio::select! {
+                    biased;
+                    _ = signal.cancelled() => return Err(AiError::Abort {
+                        message: "Request aborted".into(),
+                    }),
                     result = request.json(&body).send() => result.map_err(|error| AiError::Http {
                         status: None,
                         message: format!("http transport error: {error}"),
                     })?,
-                    _ = signal.cancelled() => return Err(AiError::Abort {
-                        message: "Request aborted".into(),
-                    }),
                 };
                 let status = response.status();
                 if status.is_success() {
@@ -608,6 +732,25 @@ fn has_auth_header(headers: &BTreeMap<String, String>) -> bool {
     headers.keys().any(|name| {
         name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-api-key")
     })
+}
+
+/// Identifies caller-provided credentials superseded by protected auth.
+///
+/// # Parameters
+/// - `name`: Header name to inspect.
+///
+/// # Returns
+/// Whether the header carries a credential that must not be copied or sent.
+fn is_protected_auth_header(name: &str) -> bool {
+    [
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "cf-aig-authorization",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 fn resolve_api_key(
