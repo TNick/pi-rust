@@ -1,0 +1,17 @@
+[package]
+name = "rpi-model-runtime"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Reusable provider and model configuration types for rpi hosts"
+
+[dependencies]
+rpi-ai = { workspace = true }
+rpi-extensions = { path = "../rpi-extensions", version = "0.6.2" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }

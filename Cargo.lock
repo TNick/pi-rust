@@ -2357,6 +2357,7 @@ dependencies = [
  "rpi-ai",
  "rpi-extensions",
  "rpi-harness",
+ "rpi-model-runtime",
  "rpi-plugin-sdk",
  "rpi-telemetry",
  "rpi-tools",
@@ -2419,6 +2420,17 @@ dependencies = [
  "tracing",
  "uuid",
  "yaml_serde",
+]
+
+[[package]]
+name = "rpi-model-runtime"
+version = "0.6.2"
+dependencies = [
+ "indexmap 2.14.2",
+ "rpi-ai",
+ "rpi-extensions",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

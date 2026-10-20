@@ -68,10 +68,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rpi_ai::providers::anthropic::models::anthropic_models;
 use rpi_ai::providers::anthropic::AnthropicProvider;
 use rpi_ai::providers::openai_completions::OpenAiCompletionsProvider;
-use rpi_ai::providers::openai_responses::openai_responses_models;
 use rpi_ai::providers::openai_responses::OpenAiResponsesProvider;
 use rpi_ai::{
     AssistantMessageEventStream, Context, Model, Provider, SimpleStreamOptions, ThinkingLevel,
@@ -311,7 +309,7 @@ fn resolve_with_factories(
     // provider id. A key belonging to `anthropic` must never make an unrelated
     // gateway available or become that gateway's provider default.
     let mut models_cfg = config::load_models_config()?;
-    apply_manifest_defaults(&mut models_cfg, &factories.manifests);
+    rpi_model_runtime::apply_provider_defaults(&mut models_cfg, &factories.manifests);
     let canonical_cli_provider = cli_provider
         .map(|requested| canonicalize_cli_provider(requested, &models_cfg))
         .transpose()?;
@@ -335,7 +333,11 @@ fn resolve_with_factories(
 
     // ---- Catalog: built-in + ~/.rpi/models.json (merged, reusing the
     // already-loaded config) ----
-    let mut catalog = build_catalog(&models_cfg, &factories.manifests);
+    let mut catalog = rpi_model_runtime::build_catalog(
+        &mut models_cfg,
+        &factories.manifests,
+        &config::CliConfigValueResolver,
+    );
 
     // The ambient Anthropic override belongs only to the built-in identity.
     // Apply the CLI override after selection so other providers keep their
@@ -815,8 +817,8 @@ pub(crate) fn execution_catalog_with_manifests(
     manifests: &[rpi_extensions::ProviderManifest],
 ) -> Result<Vec<Model>, config::ConfigError> {
     let mut cfg = config::load_models_config()?;
-    apply_manifest_defaults(&mut cfg, manifests);
-    let mut catalog = build_catalog(&cfg, manifests);
+    let mut catalog =
+        rpi_model_runtime::build_catalog(&mut cfg, manifests, &config::CliConfigValueResolver);
     catalog.sort_by(|a, b| {
         a.provider
             .to_ascii_lowercase()
@@ -824,82 +826,6 @@ pub(crate) fn execution_catalog_with_manifests(
             .then_with(|| a.id.to_ascii_lowercase().cmp(&b.id.to_ascii_lowercase()))
     });
     Ok(catalog)
-}
-
-fn apply_manifest_defaults(
-    models_cfg: &mut config::ModelsConfig,
-    manifests: &[rpi_extensions::ProviderManifest],
-) {
-    for manifest in manifests {
-        // Give package ids their own configuration namespace. User configuration
-        // overrides package defaults; no credentials are stored by declarations.
-        if !models_cfg.providers.contains_key(&manifest.id) {
-            let first = manifest.models.first();
-            let config = serde_json::from_value(serde_json::json!({
-                "api": first.map(|model| model.api.as_str()),
-                "baseUrl": first.map(|model| model.base_url.as_str()), "models":[]
-            }))
-            .expect("provider config defaults");
-            models_cfg.providers.insert(manifest.id.clone(), config);
-        }
-        if let (Some(default), Some(config)) = (
-            manifest.models.first(),
-            models_cfg.providers.get_mut(&manifest.id),
-        ) {
-            config
-                .api
-                .get_or_insert_with(|| default.api.as_str().to_string());
-            config
-                .base_url
-                .get_or_insert_with(|| default.base_url.clone());
-        }
-    }
-}
-
-fn build_catalog(
-    cfg: &config::ModelsConfig,
-    manifests: &[rpi_extensions::ProviderManifest],
-) -> Vec<Model> {
-    let mut catalog = anthropic_models();
-    catalog.extend(openai_responses_models());
-    for manifest in manifests {
-        let config = cfg.providers.get(&manifest.id);
-        for mut model in manifest.models.clone() {
-            if let Some(base) = config.and_then(|config| config.base_url.as_ref()) {
-                model.base_url = base.clone();
-            }
-            if let Some(headers) = config.and_then(|config| config.headers.as_ref()) {
-                merge_auth_headers(&mut model, &config::resolve_headers(headers, None));
-            }
-            catalog.push(model);
-        }
-    }
-    merge_user_catalog(&mut catalog, cfg);
-    catalog
-}
-
-/// Merge `~/.rpi/models.json` providers into the built-in catalog. Models from
-/// the same runtime provider and API replace entries with the same id; models
-/// with the same id under different OpenAI-compatible providers remain
-/// distinct so `provider/id` can select the intended endpoint.
-fn merge_user_catalog(catalog: &mut Vec<Model>, cfg: &config::ModelsConfig) {
-    for (provider_id, provider_cfg) in &cfg.providers {
-        let Some(models) = config::provider_to_models(provider_id, provider_cfg) else {
-            // Unsupported protocol.
-            continue;
-        };
-        for m in models {
-            if let Some(existing) = catalog.iter_mut().find(|candidate| {
-                candidate.api == m.api
-                    && candidate.provider == m.provider
-                    && candidate.id.eq_ignore_ascii_case(&m.id)
-            }) {
-                *existing = m;
-            } else {
-                catalog.push(m);
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1035,14 +961,6 @@ fn openai_credential_for<'a>(
     match credentials.get(provider_id) {
         Some(OpenAiCredential::Key(key)) => Some(key),
         _ => None,
-    }
-}
-
-fn merge_auth_headers(model: &mut Model, auth_headers: &BTreeMap<String, String>) {
-    let headers = model.headers.get_or_insert_with(BTreeMap::new);
-    for (name, value) in auth_headers {
-        headers.retain(|existing, _| !existing.eq_ignore_ascii_case(name));
-        headers.insert(name.clone(), value.clone());
     }
 }
 

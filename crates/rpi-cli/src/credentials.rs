@@ -1,141 +1,40 @@
-//! Shared, provider-scoped credential resolution for requests and auth UI.
-//! Provider packages own their environment names and anonymous policy. The host
-//! owns persistence and precedence, and never guesses a key from a wire protocol.
-use crate::config::{self, AuthStore, Credential, ProviderConfig};
+//! Provider-scoped credential resolution delegated to `rpi-model-runtime`.
+//!
+//! This module adapts the CLI's file-backed config and process environment to
+//! the reusable runtime API; credential precedence is owned upstream.
+
+#[cfg(test)]
+use crate::config::{self, Credential};
+use crate::config::{AuthStore, ProviderConfig};
 use rpi_extensions::ProviderManifest;
+pub(crate) use rpi_model_runtime::{CredentialSource, ResolvedCredential};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CredentialSource {
-    StoredApiKey,
-    StoredOauth,
-    ModelsJson,
-    Environment(String),
-    Headers,
-    Anonymous,
-    Missing,
-}
-
-impl CredentialSource {
-    pub fn is_present(&self) -> bool {
-        !matches!(self, Self::Missing)
-    }
-
-    pub fn as_json_str(&self) -> &str {
-        match self {
-            Self::StoredApiKey => "auth.json",
-            Self::StoredOauth => "oauth",
-            Self::ModelsJson => "models.json",
-            Self::Environment(name) => name,
-            Self::Headers => "headers",
-            Self::Anonymous => "anonymous",
-            Self::Missing => "none",
-        }
-    }
-}
-
-// Deliberately no Debug: this object contains secret material.
-pub(crate) struct ResolvedCredential {
-    pub key: Option<String>,
-    pub source: CredentialSource,
-    pub bearer: bool,
-}
-
-/// Only these identities have a built-in environment fallback. Other providers
-/// need a loaded declaration or an explicit models.json apiKey reference.
-pub(crate) fn builtin_api_key_env(provider: &str) -> Option<&'static str> {
-    match provider {
-        "anthropic" => Some("ANTHROPIC_API_KEY"),
-        "openai" => Some("OPENAI_API_KEY"),
-        _ => None,
-    }
-}
-
-fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|key| !key.trim().is_empty())
-}
-
+/// Resolves a provider key through the shared upstream precedence policy.
 pub(crate) fn resolve(
     provider: &str,
     config: Option<&ProviderConfig>,
     store: &AuthStore,
     manifest: Option<&ProviderManifest>,
 ) -> ResolvedCredential {
-    let bearer = config
-        .and_then(|config| config.auth_header)
-        .unwrap_or(false);
-    let credential = |key, source, bearer| ResolvedCredential {
-        key: Some(key),
-        source,
-        bearer,
-    };
-    match store.get(provider) {
-        Some(Credential::ApiKey {
-            key: Some(key),
-            env,
-        }) => {
-            if let Some(key) = nonempty(config::resolve_config_value(key, env.as_ref())) {
-                return credential(key, CredentialSource::StoredApiKey, bearer);
-            }
-        }
-        Some(Credential::Oauth {
-            access, expires, ..
-        }) if !access.trim().is_empty() => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_secs() as i64)
-                .unwrap_or(i64::MAX);
-            if *expires == 0 || *expires > now {
-                return credential(access.clone(), CredentialSource::StoredOauth, true);
-            }
-        }
-        _ => {}
-    }
-    if let Some(key) = config
-        .and_then(|config| config.api_key.as_deref())
-        .and_then(|raw| nonempty(config::resolve_config_value(raw, None)))
-    {
-        return credential(key, CredentialSource::ModelsJson, bearer);
-    }
-    // A package declaration is authoritative even for a built-in identity.
-    if manifest.is_none() && provider == "anthropic" {
-        if let Some(key) = nonempty(std::env::var("ANTHROPIC_AUTH_TOKEN").ok()) {
-            return credential(
-                key,
-                CredentialSource::Environment("ANTHROPIC_AUTH_TOKEN".into()),
-                true,
-            );
-        }
-    }
-    let env = match manifest {
-        Some(manifest) => manifest.api_key_env.as_deref(),
-        None => builtin_api_key_env(provider),
-    };
-    if let Some(name) = env {
-        if let Some(key) = nonempty(std::env::var(name).ok()) {
-            return credential(key, CredentialSource::Environment(name.into()), bearer);
-        }
-    }
-    ResolvedCredential {
-        key: None,
-        source: if manifest.is_some_and(|manifest| !manifest.requires_auth) {
-            CredentialSource::Anonymous
-        } else {
-            CredentialSource::Missing
-        },
-        bearer,
-    }
+    rpi_model_runtime::resolve_credential(
+        provider,
+        config,
+        store,
+        manifest,
+        &crate::config::CliConfigValueResolver,
+    )
 }
 
+/// Returns the standard environment key name for a built-in provider.
+pub(crate) fn builtin_api_key_env(provider: &str) -> Option<&'static str> {
+    rpi_model_runtime::builtin_api_key_env(provider)
+}
+
+/// Checks whether a model has a usable authentication header.
 pub(crate) fn has_header_auth(
     headers: Option<&std::collections::BTreeMap<String, String>>,
 ) -> bool {
-    headers.is_some_and(|headers| {
-        headers.iter().any(|(name, value)| {
-            ["authorization", "x-api-key", "cf-aig-authorization"]
-                .contains(&name.to_ascii_lowercase().as_str())
-                && !value.trim().is_empty()
-        })
-    })
+    rpi_model_runtime::has_header_auth(headers)
 }
 
 #[cfg(test)]

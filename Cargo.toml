@@ -3,6 +3,7 @@
 members = [
     "crates/rpi-telemetry",
     "crates/rpi-ai",
+    "crates/rpi-model-runtime",
     "crates/rpi-agent",
     "crates/rpi-tools",
     "crates/rpi-harness",
@@ -73,6 +74,7 @@ rpassword = "7"
 # rpi internal crates (package names and directories both use the `rpi-` prefix).
 rpi-telemetry = { path = "crates/rpi-telemetry", version = "0.6.2" }
 rpi-ai = { path = "crates/rpi-ai", version = "0.6.2" }
+rpi-model-runtime = { path = "crates/rpi-model-runtime", version = "0.6.2" }
 rpi-agent = { path = "crates/rpi-agent", version = "0.6.2" }
 rpi-tools = { path = "crates/rpi-tools", version = "0.6.2" }
 rpi-harness = { path = "crates/rpi-harness", version = "0.6.2" }
