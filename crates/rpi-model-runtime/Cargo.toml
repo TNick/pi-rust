@@ -10,7 +10,7 @@ homepage.workspace = true
 description = "Reusable provider and model configuration types for rpi hosts"
 
 [dependencies]
-rpi-ai = { workspace = true }
+rpi-ai = { workspace = true, features = ["providers"] }
 rpi-extensions = { path = "../rpi-extensions", version = "0.6.2" }
 serde = { workspace = true }
 serde_json = { workspace = true }
