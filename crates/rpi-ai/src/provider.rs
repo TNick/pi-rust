@@ -3,10 +3,16 @@
 //! provider's wire format directly; it calls `stream_simple` and consumes the
 //! returned [`AssistantMessageEventStream`].
 
-use crate::event_stream::AssistantMessageEventStream;
+use crate::event_stream::{
+    create_assistant_message_event_stream, AssistantMessageEventStream,
+};
 use crate::model::Model;
-use crate::types::{AssistantMessage, Context, DeferredHandle, ThinkingBudgets, ThinkingLevel};
+use crate::types::{
+    AssistantMessage, AssistantMessageEvent, Context, DeferredHandle, ErrorReason,
+    ThinkingBudgets, ThinkingLevel, StopReason,
+};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -27,7 +33,7 @@ pub enum CacheRetention {
 /// Options for a "simple" (non-agent) stream call — what compaction / smoke
 /// tests / bare provider usage pass. The agent loop wraps this with its richer
 /// equivalent when it drives a real turn (M2).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SimpleStreamOptions {
     /// API key. A provider may fall back to an env var when `None` (M3 anthropic
     /// reads `ANTHROPIC_API_KEY`); faux ignores it.
@@ -67,6 +73,84 @@ pub struct SimpleStreamOptions {
     /// Per-level reasoning token budgets for budget-based thinking models.
     /// Faux ignores this; anthropic uses it in `adjust_max_tokens_for_thinking`.
     pub thinking_budgets: Option<ThinkingBudgets>,
+}
+
+impl fmt::Debug for SimpleStreamOptions {
+    /// Formats safe request options while redacting keys and header values.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header_names = self.headers.as_ref().map(|headers| {
+            headers.keys().map(String::as_str).collect::<Vec<_>>()
+        });
+        let metadata_names = self.metadata.as_ref().map(|metadata| {
+            metadata.keys().map(String::as_str).collect::<Vec<_>>()
+        });
+        formatter
+            .debug_struct("SimpleStreamOptions")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
+            .field("max_retry_delay", &self.max_retry_delay)
+            .field("header_names", &header_names)
+            .field("metadata_names", &metadata_names)
+            .field("cache_retention", &self.cache_retention)
+            .field("session_id", &self.session_id.as_ref().map(|_| "[present]"))
+            .field("signal", &"[cancellation token]")
+            .field("reasoning", &self.reasoning)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("thinking_budgets", &self.thinking_budgets)
+            .finish()
+    }
+}
+
+/// Host-protected secret material that can be exposed only to request code.
+///
+/// Implementations should expose the value only for the duration of the
+/// callback and must not include it in formatting or serialization.
+pub trait SecretMaterial: Send + Sync {
+    /// Makes the secret available to one request-building callback.
+    ///
+    /// # Parameters
+    /// - `consumer`: Request code that consumes the secret synchronously.
+    fn with_secret(&self, consumer: &mut dyn FnMut(&str));
+}
+
+/// Opaque request-only provider secret supplied by a host.
+pub struct RequestSecret(std::sync::Arc<dyn SecretMaterial>);
+
+impl RequestSecret {
+    /// Wraps host-protected material for a provider request.
+    ///
+    /// # Parameters
+    /// - `material`: Host-owned secret material implementation.
+    ///
+    /// # Returns
+    /// A cloneable request-only secret handle.
+    pub fn new(material: std::sync::Arc<dyn SecretMaterial>) -> Self {
+        Self(material)
+    }
+
+    /// Lets provider request code consume the secret synchronously.
+    ///
+    /// # Parameters
+    /// - `consumer`: Request code that consumes the secret.
+    pub fn with_secret(&self, consumer: &mut dyn FnMut(&str)) {
+        self.0.with_secret(consumer);
+    }
+}
+
+impl Clone for RequestSecret {
+    /// Clones the opaque reference without copying secret bytes.
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl fmt::Debug for RequestSecret {
+    /// Formats the request secret without revealing its value.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RequestSecret([redacted])")
+    }
 }
 
 impl Default for SimpleStreamOptions {
@@ -161,6 +245,46 @@ pub trait Provider: Send + Sync {
         ctx: &Context,
         opts: &SimpleStreamOptions,
     ) -> AssistantMessageEventStream;
+
+    /// Streams with opaque host-protected request credentials when supported.
+    ///
+    /// Implementations must consume the secret only while constructing the
+    /// provider request and must not copy it into model metadata, generic
+    /// options, logs, or serialized extension envelopes. The default reports
+    /// unsupported so credentials never fall back to cloneable string options.
+    ///
+    /// # Parameters
+    /// - `model`: Model to execute.
+    /// - `ctx`: Prompt context.
+    /// - `opts`: Non-secret request options.
+    /// - `secret`: Opaque host-protected credential.
+    /// - `bearer`: Whether the provider should send bearer authorization.
+    ///
+    /// # Returns
+    /// The provider response event stream, or a safe unsupported error.
+    async fn stream_simple_with_request_secret(
+        &self,
+        model: &Model,
+        _ctx: &Context,
+        _opts: &SimpleStreamOptions,
+        _secret: &RequestSecret,
+        _bearer: bool,
+    ) -> AssistantMessageEventStream {
+        let (mut producer, stream) = create_assistant_message_event_stream();
+        let error = AssistantMessage::terminal(
+            model.api.clone(),
+            self.id(),
+            model.id.clone(),
+            StopReason::Error,
+            "provider does not support protected credential input",
+            0,
+        );
+        producer.push(AssistantMessageEvent::Error {
+            reason: ErrorReason::Error,
+            error,
+        });
+        stream
+    }
 
     /// This provider's deferred-response capability, if it has one.
     ///

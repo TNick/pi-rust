@@ -12,7 +12,9 @@ mod selection;
 
 pub use catalog::{apply_provider_defaults, build_catalog, resolve_provider_headers};
 pub use credentials::{
-    readiness_from_catalog, AuthStore, Credential, CredentialSource, ResolvedCredential,
+    readiness_from_catalog, resolve_credential_protected, AuthStore, Credential,
+    CredentialRequestSource, CredentialSource, HostCredentialMaterial, ProtectedCredential,
+    ProtectedCredentialResolver, ResolvedCredential,
 };
 pub use fingerprint::{model_configuration_fingerprint, ModelConfigurationFingerprint};
 pub use selection::{resolve_selection, ModelSelection, ResolvedSelection, SelectionError};

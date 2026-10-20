@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use rpi_ai::Model;
+use rpi_extensions::ProviderManifest;
 use serde::{Deserialize, Serialize};
 
 use crate::models::has_header_auth;
@@ -55,9 +56,168 @@ impl fmt::Debug for Credential {
 /// Provider id to credential mapping supplied by the product host.
 pub type AuthStore = BTreeMap<String, Credential>;
 
+/// Non-secret source requested from a host credential resolver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CredentialRequestSource {
+    /// Resolve an explicit host-selected command-line credential override.
+    CliOverride { provider: String },
+    /// Resolve the provider's credential from host-owned persistent storage.
+    Stored { provider: String },
+    /// Resolve a configured provider API-key expression from host config.
+    ModelsJson { provider: String },
+    /// Resolve one named environment source through host policy.
+    Environment { provider: String, name: String },
+}
+
+/// Secret material and safe source classification returned by the host.
+pub struct HostCredentialMaterial<T> {
+    /// Host-protected secret value.
+    pub material: T,
+    /// Safe source used to satisfy the request.
+    pub source: CredentialSource,
+}
+
+impl<T> fmt::Debug for HostCredentialMaterial<T> {
+    /// Formats credential source metadata without revealing host material.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostCredentialMaterial")
+            .field("material", &"[redacted]")
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+/// Resolves secret source requests without transferring plaintext to runtime.
+pub trait ProtectedCredentialResolver<T>: Send + Sync {
+    /// Resolves one non-secret source descriptor using host-owned facilities.
+    ///
+    /// For `ModelsJson`, the resolver must be bound to the exact immutable
+    /// configuration snapshot used by the execution. The provider id selects
+    /// its entry within that snapshot; callers must not redirect the request
+    /// to a different current configuration.
+    ///
+    /// # Parameters
+    /// - `source`: Provider and source kind, without credential values.
+    ///
+    /// # Returns
+    /// Host-protected material and its safe source classification when found.
+    fn resolve(
+        &self,
+        source: CredentialRequestSource,
+    ) -> Option<HostCredentialMaterial<T>>;
+}
+
+/// Protected request credential selected by upstream precedence.
+pub struct ProtectedCredential<T> {
+    /// Host-protected material for one provider request.
+    pub material: Option<T>,
+    /// Safe source classification for readiness projection.
+    pub source: CredentialSource,
+    /// Whether the request adapter should use bearer authorization.
+    pub bearer: bool,
+}
+
+impl<T> fmt::Debug for ProtectedCredential<T> {
+    /// Formats readiness metadata without revealing protected material.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProtectedCredential")
+            .field("material", &self.material.as_ref().map(|_| "[redacted]"))
+            .field("source", &self.source)
+            .field("bearer", &self.bearer)
+            .finish()
+    }
+}
+
+/// Resolves a credential through upstream precedence using host-protected data.
+///
+/// The host receives only provider/source descriptors and resolves values from
+/// its own config, credential store, or environment policy. The protected
+/// material type is preserved without converting it to `String`.
+///
+/// # Parameters
+/// - `provider`: Stable provider identity.
+/// - `config`: Provider configuration from the same immutable snapshot used by
+///   the resolver, used only for source presence and auth-header behavior.
+/// - `manifest`: Optional provider package declaration.
+/// - `resolver`: Host-owned protected-material resolver.
+///
+/// # Returns
+/// The selected protected credential, or a safe missing/anonymous status.
+pub fn resolve_credential_protected<T>(
+    provider: &str,
+    config: Option<&crate::ProviderConfig>,
+    manifest: Option<&ProviderManifest>,
+    resolver: &dyn ProtectedCredentialResolver<T>,
+) -> ProtectedCredential<T> {
+    let bearer = config
+        .and_then(|provider_config| provider_config.auth_header)
+        .unwrap_or(false);
+    let mut sources = vec![
+        CredentialRequestSource::CliOverride {
+            provider: provider.to_owned(),
+        },
+        CredentialRequestSource::Stored {
+            provider: provider.to_owned(),
+        },
+    ];
+    if config.is_some_and(|provider_config| provider_config.api_key.is_some()) {
+        sources.push(CredentialRequestSource::ModelsJson {
+            provider: provider.to_owned(),
+        });
+    }
+    if manifest.is_none() && provider == "anthropic" {
+        sources.push(CredentialRequestSource::Environment {
+            provider: provider.to_owned(),
+            name: "ANTHROPIC_AUTH_TOKEN".to_owned(),
+        });
+    }
+    if let Some(name) = manifest
+        .and_then(|value| value.api_key_env.as_deref())
+        .or_else(|| {
+            manifest
+                .is_none()
+                .then(|| crate::models::builtin_api_key_env(provider))
+                .flatten()
+        })
+    {
+        sources.push(CredentialRequestSource::Environment {
+            provider: provider.to_owned(),
+            name: name.to_owned(),
+        });
+    }
+    for request_source in sources {
+        if let Some(resolved) = resolver.resolve(request_source) {
+            let is_oauth = resolved.source == CredentialSource::StoredOauth;
+            let is_anthropic_auth_token = matches!(
+                &resolved.source,
+                CredentialSource::Environment(name) if name == "ANTHROPIC_AUTH_TOKEN"
+            );
+            return ProtectedCredential {
+                material: Some(resolved.material),
+                source: resolved.source,
+                bearer: is_oauth || is_anthropic_auth_token || bearer,
+            };
+        }
+    }
+    let source = if manifest.is_some_and(|value| !value.requires_auth) {
+        CredentialSource::Anonymous
+    } else {
+        CredentialSource::Missing
+    };
+    ProtectedCredential {
+        material: None,
+        source,
+        bearer,
+    }
+}
+
 /// Safe description of the source selected for a provider credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CredentialSource {
+    /// Credential was supplied as an explicit host command-line override.
+    CliOverride,
     /// Credential was loaded from the host's persistent auth store.
     StoredApiKey,
     /// Credential was loaded as an OAuth token.
@@ -83,6 +243,7 @@ impl CredentialSource {
     /// Returns a safe display value for the source.
     pub fn as_json_str(&self) -> &str {
         match self {
+            Self::CliOverride => "cli",
             Self::StoredApiKey => "auth.json",
             Self::StoredOauth => "oauth",
             Self::ModelsJson => "models.json",
