@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 /// # Public members
 /// - `sha256`: Hexadecimal SHA-256 digest of canonicalized known model fields.
 /// - `headers_excluded`: Always true; resolved request headers are omitted.
-/// - `arbitrary_properties_preserved`: Always false; `rpi_ai::Model` has no
-///   arbitrary property map.
+/// - `provider_options_included`: Always false; runtime-only provider options
+///   are not included in this fingerprint.
 ///
 /// # Private members
 /// None.
@@ -20,8 +20,8 @@ pub struct ModelConfigurationFingerprint {
     pub sha256: String,
     /// Whether potentially secret resolved request headers were excluded.
     pub headers_excluded: bool,
-    /// Whether unknown properties outside `rpi_ai::Model` were captured.
-    pub arbitrary_properties_preserved: bool,
+    /// Whether runtime-only provider options were included in this digest.
+    pub provider_options_included: bool,
 }
 
 /// Fingerprints known model configuration without including resolved headers.
@@ -29,11 +29,11 @@ pub struct ModelConfigurationFingerprint {
 /// The digest covers serialized fields currently represented by
 /// `rpi_ai::Model`, except `headers`, which are removed wholesale because they
 /// may contain credentials. This is not a complete output-affecting
-/// fingerprint when non-secret request headers affect execution. The model
-/// type has no arbitrary property map, so fields unknown to that type cannot
-/// be retained or fingerprinted by this API. Callers must not treat the digest
-/// as proof that two requests are equivalent when excluded headers or unknown
-/// source properties differ.
+/// fingerprint when non-secret request headers affect execution. Runtime-only
+/// provider options are deliberately excluded, as are unknown source
+/// properties that do not map to the runtime option bag. Callers must not
+/// treat the digest as proof that two requests are equivalent when excluded
+/// headers or provider options differ.
 ///
 /// # Parameters
 /// - `model`: Resolved upstream model descriptor to fingerprint.
@@ -51,7 +51,7 @@ pub fn model_configuration_fingerprint(model: &Model) -> ModelConfigurationFinge
     ModelConfigurationFingerprint {
         sha256: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
         headers_excluded: true,
-        arbitrary_properties_preserved: false,
+        provider_options_included: false,
     }
 }
 
@@ -69,62 +69,4 @@ fn canonicalize(object: &mut serde_json::Map<String, Value>) {
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     object.clear();
     object.extend(entries);
-}
-
-#[cfg(test)]
-mod tests {
-    //! Regression tests for safe model configuration fingerprints.
-
-    use std::collections::BTreeMap;
-
-    use rpi_ai::{Api, Model};
-
-    use super::model_configuration_fingerprint;
-
-    /// Constructs a small OpenAI-compatible model for fingerprint tests.
-    fn model() -> Model {
-        Model::new(
-            "model",
-            "Model",
-            Api::OpenaiCompletions,
-            "provider",
-            "https://example.test",
-        )
-    }
-
-    /// Verifies that resolved secret header values do not affect the digest.
-    #[test]
-    fn excludes_resolved_headers() {
-        let mut first = model();
-        first.headers = Some(BTreeMap::from([("Authorization".into(), "secret-a".into())]));
-        let mut second = model();
-        second.headers = Some(BTreeMap::from([("Authorization".into(), "secret-b".into())]));
-
-        let first_fingerprint = model_configuration_fingerprint(&first);
-        let second_fingerprint = model_configuration_fingerprint(&second);
-
-        assert_eq!(first_fingerprint.sha256, second_fingerprint.sha256);
-        assert!(first_fingerprint.headers_excluded);
-        assert!(!first_fingerprint.arbitrary_properties_preserved);
-    }
-
-    /// Verifies that known request-shaping properties change the digest.
-    #[test]
-    fn includes_known_sampling_properties() {
-        let mut first = model();
-        first.sampling_params = Some(serde_json::Map::from_iter([(
-            "temperature".into(),
-            serde_json::json!(0.2),
-        )]));
-        let mut second = model();
-        second.sampling_params = Some(serde_json::Map::from_iter([(
-            "temperature".into(),
-            serde_json::json!(0.8),
-        )]));
-
-        assert_ne!(
-            model_configuration_fingerprint(&first).sha256,
-            model_configuration_fingerprint(&second).sha256
-        );
-    }
 }

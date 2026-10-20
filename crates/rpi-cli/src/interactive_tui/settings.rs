@@ -1681,6 +1681,7 @@ pub(super) fn save_provider_from_form(form: &ProviderFormState) -> Result<String
             input: None,
             headers: None,
             compat: None,
+            provider_options: std::collections::BTreeMap::new(),
         }],
     };
     cfg.providers.insert(form.id.clone(), provider);

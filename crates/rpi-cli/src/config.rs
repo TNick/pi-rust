@@ -1094,6 +1094,7 @@ mod tests {
                 input: None,
                 headers: None,
                 compat: None,
+                provider_options: std::collections::BTreeMap::new(),
             }],
         };
         let models = provider_to_models("gateway", &cfg).expect("anthropic-compatible");
@@ -1300,6 +1301,7 @@ mod tests {
                 input: None,
                 headers: None,
                 compat: None,
+                provider_options: std::collections::BTreeMap::new(),
             }],
         };
         let models = provider_to_models("rpi-fake-provider", &cfg).unwrap();

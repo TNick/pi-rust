@@ -97,7 +97,9 @@ pub struct ModelDefinition {
     /// Model token pricing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<ModelCost>,
-    /// Provider-specific sampling values understood by `rpi-ai::Model`.
+    /// Sampling values merged into OpenAI-compatible request bodies.
+    ///
+    /// The Anthropic adapter does not currently consume this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling_params: Option<Map<String, Value>>,
     /// Supported input modality names.
@@ -109,6 +111,15 @@ pub struct ModelDefinition {
     /// Provider-specific compatibility metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<Value>,
+    /// Opaque provider-specific model options with no implicit request effect.
+    ///
+    /// Unknown model-definition fields are retained here and passed to the
+    /// runtime model without adding provider-specific fields to this crate.
+    /// Built-in adapters currently ignore this map; provider-specific request
+    /// builders must explicitly define and validate any supported keys.
+    /// Credential material and request headers must use their dedicated fields.
+    #[serde(flatten)]
+    pub provider_options: BTreeMap<String, Value>,
 }
 
 impl fmt::Debug for ModelDefinition {
@@ -127,6 +138,10 @@ impl fmt::Debug for ModelDefinition {
             .field("input", &self.input)
             .field("headers", &self.headers.as_ref().map(|_| "[redacted]"))
             .field("compat", &self.compat)
+            .field(
+                "provider_options",
+                &(!self.provider_options.is_empty()).then_some("[redacted]"),
+            )
             .finish()
     }
 }
@@ -337,6 +352,7 @@ pub fn provider_to_models(
             model.cost_configured = true;
         }
         model.sampling_params = definition.sampling_params.clone();
+        model.provider_options = definition.provider_options.clone();
         model.input = parse_input_modalities(definition.input.as_deref());
         let mut headers = BTreeMap::new();
         for source in [&definition.headers, &config.headers].into_iter().flatten() {

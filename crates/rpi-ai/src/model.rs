@@ -6,6 +6,7 @@
 
 use crate::types::{Api, InputModality, ModelCost, ProviderId, ThinkingLevelMap};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Compatibility flags for Anthropic Messages-compatible APIs.
 /// Mirrors TS `AnthropicMessagesCompat`. `Default` matches the documented defaults
@@ -173,7 +174,7 @@ impl StreamingProtocolCompat {
 
 /// A model entry. Mirrors TS `Model<TApi>`; the generic is erased to a runtime
 /// `Api` field so a single `Model` works for every provider.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
@@ -191,12 +192,52 @@ pub struct Model {
     pub cost_configured: bool,
     pub context_window: u64,
     pub max_tokens: u64,
+    /// Values merged into OpenAI-compatible request bodies when present.
+    /// Other built-in adapters may ignore this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling_params: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<StreamingProtocolCompat>,
+    /// Runtime-only opaque options retained from provider model configuration.
+    ///
+    /// Built-in adapters do not interpret this map. They must add explicit
+    /// provider-specific handling before any key here can affect a request.
+    /// The extension provider JSON envelope also omits this field, so plugin
+    /// transport needs a separately versioned API before plugins can consume it.
+    /// It is excluded from serialization because arbitrary properties cannot
+    /// be assumed safe for public catalog or session output.
+    #[serde(skip)]
+    pub provider_options: BTreeMap<String, serde_json::Value>,
+}
+
+impl std::fmt::Debug for Model {
+    /// Formats model metadata while redacting request credentials and options.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Model")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("api", &self.api)
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("reasoning", &self.reasoning)
+            .field("thinking_level_map", &self.thinking_level_map)
+            .field("input", &self.input)
+            .field("cost", &self.cost)
+            .field("cost_configured", &self.cost_configured)
+            .field("context_window", &self.context_window)
+            .field("max_tokens", &self.max_tokens)
+            .field("sampling_params", &self.sampling_params)
+            .field("headers", &self.headers.as_ref().map(|_| "[redacted]"))
+            .field("compat", &self.compat)
+            .field(
+                "provider_options",
+                &(!self.provider_options.is_empty()).then_some("[redacted]"),
+            )
+            .finish()
+    }
 }
 
 impl Model {
@@ -224,6 +265,7 @@ impl Model {
             sampling_params: None,
             headers: None,
             compat: None,
+            provider_options: BTreeMap::new(),
         }
     }
 
