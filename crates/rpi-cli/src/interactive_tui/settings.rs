@@ -501,47 +501,7 @@ pub(super) fn model_selector_items(
     catalog: &[rpi_ai::Model],
     lane_model_id: &str,
 ) -> Vec<SelectItem> {
-    let mut seen = std::collections::HashSet::new();
-    catalog
-        .iter()
-        .filter(|m| {
-            seen.insert((
-                m.api.clone(),
-                m.provider.to_ascii_lowercase(),
-                m.id.to_ascii_lowercase(),
-            ))
-        })
-        .map(|m| {
-            let label = if m.name.is_empty() {
-                short_model_name(&m.id)
-            } else {
-                m.name.clone()
-            };
-            let identity = format!("{}/{}", m.provider, m.id);
-            let marker = if m.id.eq_ignore_ascii_case(lane_model_id) {
-                " (current)"
-            } else {
-                ""
-            };
-            // upstream ranks provider-prefixed queries first, so the bare id
-            // is not the leading token (`getModelSelectorSearchText`).
-            let name = if m.name.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", m.name)
-            };
-            let search_text = format!(
-                "{} {}/{} {} {}{}",
-                m.provider, m.provider, m.id, m.provider, m.id, name
-            );
-            // Value carries the provider-qualified identity so a bare model id
-            // that exists at multiple endpoints can never resolve to the wrong
-            // provider (`find_model_selector_match` understands both forms).
-            SelectItem::new(&identity, &label)
-                .with_description(&format!("{identity}{marker}"))
-                .with_search_text(&search_text)
-        })
-        .collect()
+    rpi_agent_ui::model_selector_items(catalog, lane_model_id)
 }
 
 /// Resolve a selector input by either bare model id or the qualified

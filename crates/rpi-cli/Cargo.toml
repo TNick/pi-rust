@@ -25,6 +25,7 @@ rpi-agent = { workspace = true }
 rpi-tools = { workspace = true }
 rpi-harness = { workspace = true }
 rpi-tui = { workspace = true }
+rpi-agent-ui = { workspace = true }
 rpi-plugin-sdk = { workspace = true }
 rpi-extensions = { workspace = true }
 tokio = { workspace = true, features = ["signal", "io-std", "net"] }

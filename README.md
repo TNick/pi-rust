@@ -163,24 +163,26 @@ provider — the full version is in [`examples/minimal/src/main.rs`](examples/mi
 
 ## Crates
 
-Nine crates, one version, published together. Dependency direction is one-way
-and enforced in review:
+Composable crates, one version, published together. Dependency direction is
+one-way and enforced in review:
 
 ```
 rpi-telemetry → rpi-ai → rpi-agent → rpi-tools → rpi-harness
 ```
 
-Four crates sit outside that chain:
+Additional library and product crates compose those primitives:
 
 - `rpi-tui` depends on no other `rpi-*` crate.
+- `rpi-agent-ui` composes `rpi-ai` metadata with `rpi-tui` controls; it does not
+  depend on CLI configuration or provider credentials.
 - `rpi-plugin-sdk` is a leaf too (it has no `rpi-*` deps), but it is not only
   the host's plugin contract: `rpi-tools` also reads its env-var names, so the
   host and its plugins cannot disagree about the strings they exchange across
   the ABI. That edge is names-only — nothing is linked or called.
 - `rpi-extensions` is `rpi-plugin-sdk` plus `rpi-ai`/`rpi-agent`, since it hosts
   plugins that run tools.
-- `rpi-cli` depends on all eight of the others, which is how the `rpi` binary
-gets the TUI, the harness and the plugin loader at once.
+- `rpi-cli` composes the runtime, UI, and extension libraries into the `rpi`
+  product.
 
 | Crate | What it is |
 | ----- | ---------- |
@@ -190,6 +192,7 @@ gets the TUI, the harness and the plugin loader at once.
 | [`rpi-tools`](https://crates.io/crates/rpi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
 | [`rpi-harness`](https://crates.io/crates/rpi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
 | [`rpi-tui`](https://crates.io/crates/rpi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
+| [`rpi-agent-ui`](https://crates.io/crates/rpi-agent-ui) | Reusable provider, model, and thinking selectors built on `rpi-tui` |
 | [`rpi-cli`](https://crates.io/crates/rpi-cli) | The `rpi` binary: TUI, one-shot and JSON modes, config, plugin loading |
 | [`rpi-plugin-sdk`](https://crates.io/crates/rpi-plugin-sdk) | The stable `#[repr(C)]` ABI contract for plugins. No `rpi-*` deps; only `serde_json`, behind a default `json` feature that can be turned off |
 | [`rpi-extensions`](https://crates.io/crates/rpi-extensions) | Host-side plugin loader and the async-across-ABI tool bridge |

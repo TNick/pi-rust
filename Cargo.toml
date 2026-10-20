@@ -8,6 +8,7 @@ members = [
     "crates/rpi-harness",
     "crates/rpi-cli",
     "crates/rpi-tui",
+    "crates/rpi-agent-ui",
     "crates/rpi-plugin-sdk",
     "crates/rpi-extensions",
     "examples/minimal",
@@ -78,6 +79,7 @@ rpi-tools = { path = "crates/rpi-tools", version = "0.6.2" }
 rpi-harness = { path = "crates/rpi-harness", version = "0.6.2" }
 
 rpi-tui = { path = "crates/rpi-tui", version = "0.6.2" }
+rpi-agent-ui = { path = "crates/rpi-agent-ui", version = "0.6.2" }
 
 rpi-plugin-sdk = { path = "crates/rpi-plugin-sdk", version = "0.6.2" }
 rpi-extensions = { path = "crates/rpi-extensions", version = "0.6.2" }

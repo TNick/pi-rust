@@ -1,0 +1,15 @@
+[package]
+name = "rpi-agent-ui"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Reusable agent-product selectors built on rpi-tui"
+
+[dependencies]
+rpi-ai = { workspace = true }
+rpi-tui = { workspace = true }
+

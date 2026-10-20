@@ -2312,6 +2312,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpi-agent-ui"
+version = "0.6.2"
+dependencies = [
+ "rpi-ai",
+ "rpi-tui",
+]
+
+[[package]]
 name = "rpi-ai"
 version = "0.6.2"
 dependencies = [
@@ -2354,6 +2362,7 @@ dependencies = [
  "reqwest",
  "rpassword",
  "rpi-agent",
+ "rpi-agent-ui",
  "rpi-ai",
  "rpi-extensions",
  "rpi-harness",

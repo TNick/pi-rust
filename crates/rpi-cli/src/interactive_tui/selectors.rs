@@ -43,6 +43,18 @@ pub(super) fn open_searchable_selector(
     kind: SelectorKind,
 ) -> Arc<SearchableSelectList> {
     let searchable = Arc::new(SearchableSelectList::new(title, description, list));
+    open_searchable_component(state, editor_container, editor, tui, searchable, kind)
+}
+
+/// Install and focus an already constructed upstream searchable selector.
+pub(super) fn open_searchable_component(
+    state: &Arc<TuiState>,
+    editor_container: &Arc<Container>,
+    editor: &Arc<Editor>,
+    tui: &Arc<TuiAltScreen>,
+    searchable: Arc<SearchableSelectList>,
+    kind: SelectorKind,
+) -> Arc<SearchableSelectList> {
     open_selector_with_view(
         state,
         editor_container,
@@ -129,8 +141,7 @@ pub(super) fn open_model_selector(
     chat: &Arc<Container>,
     initial_search: Option<&str>,
 ) -> Option<Arc<SearchableSelectList>> {
-    let items = model_selector_items(catalog, lane_model_id);
-    if items.is_empty() {
+    if catalog.is_empty() {
         add_note_message(
             chat,
             "No models in the catalog. Use --model at startup to select one.",
@@ -138,7 +149,8 @@ pub(super) fn open_model_selector(
         tui.request_render(false);
         return None;
     }
-    let list = Arc::new(SelectList::new(items, 10));
+    let searchable = rpi_agent_ui::model_selector(catalog, lane_model_id);
+    let list = searchable.list().clone();
 
     // Capture the catalog + lane so the on_select closure can resolve the
     // chosen Model and apply it. `on_select` fires on the blocking key thread,
@@ -176,14 +188,12 @@ pub(super) fn open_model_selector(
         close_selector(&state_cancel, &ec_cancel, &editor_cancel, &tui_cancel);
     }));
 
-    let searchable = open_searchable_selector(
+    let searchable = open_searchable_component(
         state,
         editor_container,
         editor,
         tui,
-        Some("Select model"),
-        Some("Type to filter by name, provider, or id"),
-        list,
+        searchable,
         SelectorKind::Model,
     );
     if let Some(term) = initial_search {
@@ -582,7 +592,14 @@ pub(super) fn open_provider_selector(
             .with_description("Delete a models.json provider")
             .with_search_text("remove delete provider"),
     );
-    let list = Arc::new(SelectList::new(items, 10));
+    let options: Vec<rpi_agent_ui::ProviderOption> = items.into_iter().map(Into::into).collect();
+    let searchable = rpi_agent_ui::provider_selector(
+        &options,
+        None,
+        "Select provider",
+        "Type to filter providers · Enter selects · Esc cancels",
+    );
+    let list = searchable.list().clone();
 
     let state_sel = state.clone();
     let ec_sel = editor_container.clone();
@@ -613,14 +630,12 @@ pub(super) fn open_provider_selector(
 
     // Searchable like `/model` so the selector carries a title, a filter box,
     // and the Enter/Esc affordances instead of a bare list.
-    open_searchable_selector(
+    open_searchable_component(
         state,
         editor_container,
         editor,
         tui,
-        Some("Select provider"),
-        Some("Type to filter providers · Enter selects · Esc cancels"),
-        list,
+        searchable,
         SelectorKind::Provider,
     );
 }
@@ -645,7 +660,14 @@ pub(super) fn open_login_provider_selector(
         tui.request_render(false);
         return;
     }
-    let list = Arc::new(SelectList::new(items, 10));
+    let options: Vec<rpi_agent_ui::ProviderOption> = items.into_iter().map(Into::into).collect();
+    let searchable = rpi_agent_ui::provider_selector(
+        &options,
+        None,
+        "Log in to provider",
+        "Type to filter providers · Enter selects · Esc cancels",
+    );
+    let list = searchable.list().clone();
     let state_sel = state.clone();
     let ec_sel = editor_container.clone();
     let editor_sel = editor.clone();
@@ -671,14 +693,12 @@ pub(super) fn open_login_provider_selector(
     list.on_cancel(Arc::new(move || {
         close_selector(&state_cancel, &ec_cancel, &editor_cancel, &tui_cancel);
     }));
-    open_searchable_selector(
+    open_searchable_component(
         state,
         editor_container,
         editor,
         tui,
-        Some("Log in to provider"),
-        Some("Type to filter providers · Enter selects · Esc cancels"),
-        list,
+        searchable,
         SelectorKind::Provider,
     );
 }
@@ -781,51 +801,9 @@ pub(super) fn open_provider_remove_selector(
 // Feasible selectors — /thinking, /tools, /images
 // ===========================================================================
 
-/// One-line descriptions for each thinking level, ported from
-/// thinking-selector.ts (the TS `getThinkingLevelDescription` table).
-pub(super) fn thinking_level_description(level: rpi_ai::types::ThinkingLevel) -> &'static str {
-    use rpi_ai::types::ThinkingLevel::*;
-    match level {
-        Off => "Off — No reasoning",
-        Minimal => "Minimal — Brief reasoning (~1k tokens)",
-        Low => "Low — Light reasoning (~1k tokens)",
-        Medium => "Medium — Moderate reasoning (~80% of max)",
-        High => "High — Extensive reasoning (~95% of max)",
-        Xhigh => "Xhigh — Near-maximal reasoning",
-        Max => "Max — Maximum reasoning",
-    }
-}
-
-/// The lowercase serialized name of a [`ThinkingLevel`] (matches its
-/// `#[serde(rename_all = "lowercase")]` form): "off", "minimal", … "max".
-pub(super) fn thinking_level_name(level: rpi_ai::types::ThinkingLevel) -> &'static str {
-    use rpi_ai::types::ThinkingLevel::*;
-    match level {
-        Off => "off",
-        Minimal => "minimal",
-        Low => "low",
-        Medium => "medium",
-        High => "high",
-        Xhigh => "xhigh",
-        Max => "max",
-    }
-}
-
-/// Parse a thinking-level name back to the enum (case-insensitive). Returns
-/// `None` for an unknown name; used by the `/thinking` selector callback.
-pub(super) fn thinking_level_from_name(name: &str) -> Option<rpi_ai::types::ThinkingLevel> {
-    use rpi_ai::types::ThinkingLevel::*;
-    match name.to_ascii_lowercase().as_str() {
-        "off" => Some(Off),
-        "minimal" => Some(Minimal),
-        "low" => Some(Low),
-        "medium" => Some(Medium),
-        "high" => Some(High),
-        "xhigh" => Some(Xhigh),
-        "max" => Some(Max),
-        _ => None,
-    }
-}
+pub(super) use rpi_agent_ui::{
+    thinking_level_description, thinking_level_from_name, thinking_level_name,
+};
 
 /// Build + open the `/thinking` selector. Items are the levels the current
 /// model supports (`Model::supported_thinking_levels`), each with a
@@ -857,17 +835,12 @@ pub(super) fn open_thinking_selector(
             use rpi_ai::types::ThinkingLevel::*;
             vec![Off, Minimal, Low, Medium, High]
         });
-    let mut items: Vec<SelectItem> = Vec::new();
-    for lvl in &levels {
-        let name = thinking_level_name(*lvl);
-        items.push(SelectItem::new(name, name).with_description(thinking_level_description(*lvl)));
-    }
-    if items.is_empty() {
+    if levels.is_empty() {
         add_note_message(chat, "This model has no supported thinking levels.");
         tui.request_render(false);
         return;
     }
-    let list = Arc::new(SelectList::new(items, 10));
+    let list = rpi_agent_ui::thinking_selector(&levels);
 
     let state_sel = state.clone();
     let ec_sel = editor_container.clone();
