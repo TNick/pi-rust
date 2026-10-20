@@ -5,20 +5,20 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::component::Component;
 use super::container::Container;
 use super::layout::{
-    composite_tui_line, extract_cursor_position, render_layout_frame,
-    render_layout_frame_reusing_scroll_content, LayoutFrame,
+    LayoutFrame, composite_tui_line, extract_cursor_position, render_layout_frame,
+    render_layout_frame_reusing_scroll_content,
 };
 use super::overlay::OverlayManager;
 use super::scroll_view::ScrollView;
-use super::tui::{OverlayHandle, OverlayOptions, TuiMode, TuiStopOptions, TUI};
-use crate::ansi::{visible_width, CURSOR_MARKER};
+use super::tui::{OverlayHandle, OverlayOptions, TUI, TuiMode, TuiStopOptions};
+use crate::ansi::{CURSOR_MARKER, visible_width};
 use crate::terminal::{InputEvent, Terminal, TerminalInfo};
 
 /// Symbol for ViewportTUI capability check.
@@ -236,10 +236,11 @@ impl TuiAltScreen {
         if self.scheduler_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        let tui = self.clone();
+        let tui = Arc::downgrade(self);
+        let scheduler = Arc::clone(&self.scheduler);
         let spawned = std::thread::Builder::new()
             .name("rpi-tui-render".to_string())
-            .spawn(move || tui.run_render_scheduler());
+            .spawn(move || Self::run_render_scheduler(tui, scheduler));
         match spawned {
             Ok(handle) => {
                 if let Ok(mut slot) = self.scheduler_thread.lock() {
@@ -257,16 +258,16 @@ impl TuiAltScreen {
     /// Scheduler thread body: sleep until a frame is owed, then paint at most one
     /// frame per [`MIN_RENDER_INTERVAL_MS`]. Idle screens pay no wakeups at all —
     /// the thread is parked on the condvar.
-    fn run_render_scheduler(self: Arc<Self>) {
+    fn run_render_scheduler(tui: Weak<Self>, scheduler: Arc<RenderScheduler>) {
         let interval = Duration::from_millis(MIN_RENDER_INTERVAL_MS);
         loop {
             // ---- Wait for a frame to be owed (or shutdown) ----
             {
-                let Ok(mut state) = self.scheduler.state.lock() else {
+                let Ok(mut state) = scheduler.state.lock() else {
                     return;
                 };
                 while state.pending.is_none() && !state.shutdown {
-                    let Ok(next) = self.scheduler.cv.wait(state) else {
+                    let Ok(next) = scheduler.cv.wait(state) else {
                         return;
                     };
                     state = next;
@@ -278,7 +279,7 @@ impl TuiAltScreen {
             // ---- Hold the frame back until the throttle window elapses ----
             loop {
                 let remaining = {
-                    let Ok(state) = self.scheduler.state.lock() else {
+                    let Ok(state) = scheduler.state.lock() else {
                         return;
                     };
                     match interval.checked_sub(state.last_render_at.elapsed()) {
@@ -286,20 +287,23 @@ impl TuiAltScreen {
                         None => break,
                     }
                 };
-                let Ok(state) = self.scheduler.state.lock() else {
+                let Ok(state) = scheduler.state.lock() else {
                     return;
                 };
                 if state.shutdown {
                     return;
                 }
-                let Ok((state, _)) = self.scheduler.cv.wait_timeout(state, remaining) else {
+                let Ok((state, _)) = scheduler.cv.wait_timeout(state, remaining) else {
                     return;
                 };
                 if state.shutdown {
                     return;
                 }
             }
-            self.flush_pending_render();
+            let Some(tui) = tui.upgrade() else {
+                return;
+            };
+            tui.flush_pending_render();
         }
     }
 
@@ -1242,7 +1246,7 @@ impl TUI for TuiAltScreen {
         if let Ok(terminal) = self.terminal.lock() {
             terminal.start(
                 Box::new(move |event: InputEvent| {
-                    if !*running.lock().unwrap() {
+                    if !running.lock().map(|running| *running).unwrap_or(false) {
                         return;
                     }
                     if matches!(&event, InputEvent::Resize(_, _)) {
@@ -1254,10 +1258,14 @@ impl TUI for TuiAltScreen {
                     }
                 }),
                 Box::new({
+                    let running = self.running.clone();
                     let resize_dirty = Arc::clone(&self.resize_dirty);
                     let scheduler = Arc::clone(&self.scheduler);
                     let scheduler_started = Arc::clone(&self.scheduler_started);
                     move || {
+                        if !running.lock().map(|running| *running).unwrap_or(false) {
+                            return;
+                        }
                         resize_dirty.store(true, Ordering::Release);
                         if scheduler_started.load(Ordering::Acquire) {
                             scheduler.park(false);
@@ -1286,7 +1294,9 @@ impl TUI for TuiAltScreen {
         // shutdown (the class of bug the 0.1.18 regular-mode fix targets).
         self.scheduler.shutdown();
         if let Some(handle) = self.scheduler_thread.lock().ok().and_then(|mut s| s.take()) {
-            let _ = handle.join();
+            if handle.thread().id() != std::thread::current().id() {
+                let _ = handle.join();
+            }
         }
 
         if self.uses_main_screen() {
@@ -1346,6 +1356,14 @@ impl TUI for TuiAltScreen {
 
     fn full_redraws(&self) -> usize {
         self.full_redraw_count.lock().map(|c| *c).unwrap_or(0)
+    }
+}
+
+impl Drop for TuiAltScreen {
+    fn drop(&mut self) {
+        if self.is_running() {
+            <Self as TUI>::stop(self, TuiStopOptions::default());
+        }
     }
 }
 
@@ -1839,12 +1857,13 @@ mod tests {
         tui.start_readerless();
         tui.scroll_by(-4);
         assert!(!scroll.is_following_end());
-        assert!(tui
-            .previous_screen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|line| line.contains("Jump to latest")));
+        assert!(
+            tui.previous_screen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("Jump to latest"))
+        );
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 20,
@@ -1853,12 +1872,13 @@ mod tests {
         };
         assert!(tui.handle_scroll_to_end_indicator_mouse_event(&click));
         assert!(scroll.is_following_end());
-        assert!(!tui
-            .previous_screen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|line| line.contains("Jump to latest")));
+        assert!(
+            !tui.previous_screen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("Jump to latest"))
+        );
         assert_eq!(editor.get_text(), "未发送的草稿");
         let focused: Arc<dyn Component> = editor.clone();
         assert!(Arc::ptr_eq(&tui.get_focus().unwrap(), &focused));
@@ -1873,12 +1893,13 @@ mod tests {
             scroll.scroll_top(),
             scroll.content_height() - scroll.viewport_height()
         );
-        assert!(tui
-            .previous_screen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|line| line.contains("message 24")));
+        assert!(
+            tui.previous_screen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("message 24"))
+        );
         tui.stop(Default::default());
     }
 

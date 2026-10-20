@@ -4,7 +4,9 @@
 //! using crossterm.
 
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossterm::{
@@ -180,6 +182,8 @@ pub trait Terminal: Send + Sync {
 pub struct ProcessTerminal {
     info: Mutex<TerminalInfo>,
     running: Mutex<bool>,
+    reader_running: Arc<AtomicBool>,
+    reader_thread: Mutex<Option<JoinHandle<()>>>,
     writer: Mutex<Box<dyn Write + Send + Sync>>,
     #[cfg(any(unix, test))]
     keyboard: Mutex<KeyboardProtocolState>,
@@ -214,6 +218,8 @@ impl ProcessTerminal {
         Self {
             info: Mutex::new(info),
             running: Mutex::new(false),
+            reader_running: Arc::new(AtomicBool::new(false)),
+            reader_thread: Mutex::new(None),
             writer: Mutex::new(Box::new(io::stdout())),
             #[cfg(any(unix, test))]
             keyboard: Mutex::new(KeyboardProtocolState::default()),
@@ -378,21 +384,37 @@ impl Terminal for ProcessTerminal {
         on_input: Box<dyn Fn(InputEvent) + Send + Sync>,
         on_resize: Box<dyn Fn() + Send + Sync>,
     ) {
+        let Ok(mut active) = self.running.lock() else {
+            return;
+        };
+        if *active {
+            return;
+        }
+        *active = true;
+        drop(active);
+
         self.enter_raw_mode();
 
         // Update size initially
         self.update_size();
 
-        // Spawn input handling thread
-        let running = Arc::new(Mutex::new(true));
-        let running_clone = running.clone();
+        // Spawn the input reader with a stop flag and retained join handle.
+        let Ok(mut reader_thread) = self.reader_thread.lock() else {
+            self.stop();
+            return;
+        };
+        if !self.running.lock().map(|running| *running).unwrap_or(false) {
+            return;
+        }
+        self.reader_running.store(true, Ordering::Release);
+        let running = Arc::clone(&self.reader_running);
         let info_clone = Arc::new(Mutex::new(self.info()));
         let supports_kitty_keyboard = self.info().supports_kitty_keyboard;
 
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             loop {
                 // Check if we're still running
-                if !*running_clone.lock().unwrap() {
+                if !running.load(Ordering::Acquire) {
                     break;
                 }
 
@@ -424,16 +446,24 @@ impl Terminal for ProcessTerminal {
                 }
             }
         });
-
-        // Store running flag
-        if let Ok(mut r) = self.running.lock() {
-            *r = true;
-        }
+        *reader_thread = Some(reader);
     }
 
     fn stop(&self) {
         if let Ok(mut running) = self.running.lock() {
             *running = false;
+        }
+        let reader = if let Ok(mut thread) = self.reader_thread.lock() {
+            self.reader_running.store(false, Ordering::Release);
+            thread.take()
+        } else {
+            self.reader_running.store(false, Ordering::Release);
+            None
+        };
+        if let Some(reader) = reader {
+            if reader.thread().id() != std::thread::current().id() {
+                let _ = reader.join();
+            }
         }
 
         self.disable_mouse();
@@ -538,6 +568,12 @@ fn normalize_native_shift_enter(mut key: KeyEvent, shift_pressed: bool) -> KeyEv
         key.modifiers.insert(event::KeyModifiers::SHIFT);
     }
     key
+}
+
+impl Drop for ProcessTerminal {
+    fn drop(&mut self) {
+        Terminal::stop(self);
+    }
 }
 
 #[cfg(test)]
