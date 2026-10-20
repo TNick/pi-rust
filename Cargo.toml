@@ -84,6 +84,7 @@ rpi-tui = { path = "crates/rpi-tui", version = "0.6.2" }
 
 rpi-plugin-sdk = { path = "crates/rpi-plugin-sdk", version = "0.6.2" }
 rpi-extensions = { path = "crates/rpi-extensions", version = "0.6.2" }
+rpi-provider-runtime = { path = "packages/provider-runtime", version = "0.6.2" }
 
 [profile.release]
 lto = "thin"

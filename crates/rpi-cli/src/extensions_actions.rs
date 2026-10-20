@@ -377,7 +377,7 @@ impl RuntimeActionHost for HarnessActionHost {
         self.children.cancel_owner(owner);
     }
     fn replace_model_catalog(&self, models: Vec<rpi_ai::Model>) {
-        crate::provider::reconcile_live_catalog(&self.catalog, models);
+        self.catalog.reconcile_models(models);
     }
     async fn get_execution_context(
         &self,

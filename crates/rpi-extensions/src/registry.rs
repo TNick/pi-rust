@@ -16,7 +16,8 @@ use rpi_agent::error::AgentError;
 use rpi_ai::types::Tool;
 use rpi_plugin_sdk::{
     BeforeAgentStartFn, CommandHandlerFn, EventHandlerFn, EventTag, FreeStringFn, OAuthRequestFn,
-    ProviderRequestFn, ProviderStreamRequestFn, RenderFn, ResourcesDiscoverFn, EVENT_TAG_COUNT,
+    ProtectedProviderRequestFn, ProtectedProviderStreamRequestFn, ProviderRequestFn,
+    ProviderStreamRequestFn, RenderFn, ResourcesDiscoverFn, EVENT_TAG_COUNT,
 };
 
 use crate::tool::PluginToolHandle;
@@ -240,6 +241,10 @@ pub struct RegisteredProvider {
     pub base_url: String,
     pub api_style: String,
     pub request_fn: ProviderRequestFn,
+    /// One-shot callback that accepts protected credential control.
+    pub protected_request_fn: Option<ProtectedProviderRequestFn>,
+    /// Streaming callback using versioned protected credential control.
+    pub protected_stream_fn: Option<ProtectedProviderStreamRequestFn>,
     /// Streaming request fn (streaming providers only).
     pub stream_fn: Option<ProviderStreamRequestFn>,
     pub plugin_free_string: FreeStringFn,
@@ -690,6 +695,76 @@ impl ExtensionRegistry {
             // plugin re-sent.
             existing.stream_fn = provider.stream_fn;
             existing.request_fn = provider.request_fn;
+            existing.protected_request_fn = provider.protected_request_fn;
+            existing.protected_stream_fn = provider.protected_stream_fn;
+            existing.base_url = provider.base_url;
+            existing.api_style = provider.api_style;
+            existing.plugin_free_string = provider.plugin_free_string;
+            existing.user_data = provider.user_data;
+            return false;
+        }
+        self.providers.push(provider);
+        false
+    }
+
+    /// Register or upgrade a one-shot provider with protected credential input.
+    ///
+    /// A protected registration upgrades an existing unprotected one-shot
+    /// registration, while the first streaming or protected registration wins.
+    ///
+    /// # Parameters
+    /// - `provider`: Provider registration containing a protected callback.
+    ///
+    /// # Returns
+    /// `true` when an existing protected or streaming provider wins.
+    pub fn register_protected_provider(&mut self, provider: RegisteredProvider) -> bool {
+        debug_assert!(provider.protected_request_fn.is_some());
+        if let Some(existing) = self
+            .providers
+            .iter_mut()
+            .find(|existing| existing.provider_id == provider.provider_id)
+        {
+            if existing.protected_stream_fn.is_some()
+                || existing.stream_fn.is_some()
+                || existing.protected_request_fn.is_some()
+            {
+                return true;
+            }
+            existing.protected_request_fn = provider.protected_request_fn;
+            existing.base_url = provider.base_url;
+            existing.api_style = provider.api_style;
+            existing.plugin_free_string = provider.plugin_free_string;
+            existing.user_data = provider.user_data;
+            return false;
+        }
+        self.providers.push(provider);
+        false
+    }
+
+    /// Register or upgrade a streaming provider with protected request inputs.
+    ///
+    /// Protected streaming replaces legacy one-shot or streaming registrations;
+    /// the first protected streaming registration for an id wins.
+    ///
+    /// # Parameters
+    /// - `provider`: Provider registration containing a protected streaming fn.
+    ///
+    /// # Returns
+    /// `true` when an existing protected streaming provider wins.
+    pub fn register_protected_streaming_provider(&mut self, provider: RegisteredProvider) -> bool {
+        debug_assert!(provider.protected_stream_fn.is_some());
+        if let Some(existing) = self
+            .providers
+            .iter_mut()
+            .find(|existing| existing.provider_id == provider.provider_id)
+        {
+            if existing.protected_stream_fn.is_some() {
+                return true;
+            }
+            existing.request_fn = provider.request_fn;
+            existing.protected_request_fn = provider.protected_request_fn;
+            existing.stream_fn = provider.stream_fn;
+            existing.protected_stream_fn = provider.protected_stream_fn;
             existing.base_url = provider.base_url;
             existing.api_style = provider.api_style;
             existing.plugin_free_string = provider.plugin_free_string;
@@ -1307,6 +1382,8 @@ mod provider_manifest_tests {
             base_url: "http://localhost".into(),
             api_style: "openai-completions".into(),
             request_fn: request,
+            protected_request_fn: None,
+            protected_stream_fn: None,
             stream_fn: None,
             plugin_free_string: rpi_plugin_sdk::callbacks::free_string,
             user_data: std::ptr::null_mut(),

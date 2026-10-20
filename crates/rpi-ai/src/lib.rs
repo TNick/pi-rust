@@ -33,8 +33,9 @@ pub use error::AiError;
 pub use event_stream::{AssistantMessageEventStream, AssistantMessageEventStreamProducer};
 pub use model::{Model, StreamingProtocolCompat};
 pub use provider::{
-    CacheRetention, ContextPatch, NoopProviderHooks, Provider, ProviderHooks, RequestSecret,
-    SecretMaterial, SimpleStreamOptions, SimpleStreamOptionsPatch, DEFAULT_LLM_API_TIMEOUT,
+    AppliedRequestSettings, AppliedRequestSettingsCallback, CacheRetention, ContextPatch,
+    NoopProviderHooks, Provider, ProviderHooks, RequestSecret, SecretMaterial, SimpleStreamOptions,
+    SimpleStreamOptionsPatch, DEFAULT_LLM_API_TIMEOUT,
 };
 pub use schema::validate_tool_arguments;
 pub use types::{

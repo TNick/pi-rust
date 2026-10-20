@@ -10,6 +10,8 @@ use rpi_plugin_sdk::{
 };
 use std::{ffi::c_void, sync::Arc, time::Duration};
 
+pub mod packages;
+
 pub type Factory = fn(&Model, &SimpleStreamOptions) -> Arc<dyn Provider>;
 
 /// Reuse the maintained OpenAI-compatible protocol without importing any

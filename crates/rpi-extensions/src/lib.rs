@@ -61,7 +61,8 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
 use rpi_plugin_sdk::{
-    BeforeAgentStartFn, EventHandlerFn, EventTag, FreeStringFn, OAuthRequestFn, ProviderRequestFn,
+    BeforeAgentStartFn, EventHandlerFn, EventTag, FreeStringFn, OAuthRequestFn,
+    ProtectedProviderRequestFn, ProtectedProviderStreamRequestFn, ProviderRequestFn,
     ProviderStreamRequestFn, RenderFn, ResourcesDiscoverFn, RuntimeActionFn, StablePluginEvent,
     StableToolSchema, StbString, StbStringRef, ToolCancelFn, ToolDestroyFn, ToolExecuteFn,
     ToolPollFn,
@@ -87,6 +88,9 @@ pub use project_packages::{ProjectPackage, ProjectPackageRegistry};
 pub use prompt_transform::emit_before_agent_start;
 pub use provider::PluggableProvider;
 pub use provider_hooks::ExtensionProviderHooks;
+pub use provider_reload::{
+    active_provider_was_removed, providers_for_reload, requires_provider_catalog_refresh,
+};
 pub use registry::{
     assert_active, current_platform, platform_allows, BeforeAgentStartHandler, ExtensionRegistry,
     ExtensionTool, ProviderManifest, RegisteredFlag, RegisteredHandler, RegisteredOAuthProvider,
@@ -114,6 +118,7 @@ mod project_packages;
 mod prompt_transform;
 mod provider;
 mod provider_hooks;
+mod provider_reload;
 mod registry;
 mod resources;
 mod status;
@@ -289,10 +294,14 @@ impl HostApi {
             register_entry_renderer: Some(trampoline_register_entry_renderer), // B5c
             register_event_handler: Some(trampoline_register_event_handler),
             register_resources_discover: Some(trampoline_register_resources_discover),
-            // Appended last so `struct_size` grows without shifting any earlier
-            // offset (a plugin built against the previous layout keeps working).
+            // Appended registrar slots grow `struct_size` without shifting any
+            // earlier field offset.
             register_before_agent_start: Some(trampoline_register_before_agent_start),
             register_oauth_provider: Some(trampoline_register_oauth_provider),
+            register_protected_provider: Some(trampoline_register_protected_provider),
+            register_protected_streaming_provider: Some(
+                trampoline_register_protected_streaming_provider,
+            ),
             runtime_action: runtime_action_fn,
             dispatch_event: Some(trampoline_dispatch_event),
             user_data: ud,
@@ -587,6 +596,8 @@ extern "C" fn trampoline_register_provider(
         base_url: unsafe { base_url.as_str().to_string() },
         api_style: unsafe { api_style.as_str().to_string() },
         request_fn,
+        protected_request_fn: None,
+        protected_stream_fn: None,
         // One-shot registration: no streaming fn. A plugin that also calls
         // `register_streaming_provider` upgrades this record in place.
         stream_fn: None,
@@ -599,6 +610,97 @@ extern "C" fn trampoline_register_provider(
             None => false,
         },
     );
+    if ok == Some(true) {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Register a one-shot provider whose credentials arrive through the protected
+/// request control callback.
+///
+/// # Parameters
+/// - `provider_id`: Stable provider identity.
+/// - `base_url`: Provider endpoint.
+/// - `api_style`: Provider protocol identifier.
+/// - `request_fn`: Protected one-shot callback.
+/// - `plugin_free_string`: Deallocator for plugin-owned response strings.
+/// - `user_data`: Plugin-owned callback context.
+///
+/// # Returns
+/// Zero when registration succeeds; negative when the host rejects it.
+extern "C" fn trampoline_register_protected_provider(
+    provider_id: StbStringRef,
+    base_url: StbStringRef,
+    api_style: StbStringRef,
+    request_fn: ProtectedProviderRequestFn,
+    plugin_free_string: FreeStringFn,
+    user_data: *mut c_void,
+) -> i32 {
+    if !current_api_present() {
+        return -1;
+    }
+    let record = crate::registry::RegisteredProvider {
+        provider_id: unsafe { provider_id.as_str().to_string() },
+        base_url: unsafe { base_url.as_str().to_string() },
+        api_style: unsafe { api_style.as_str().to_string() },
+        request_fn: unsupported_one_shot_provider_request,
+        protected_request_fn: Some(request_fn),
+        protected_stream_fn: None,
+        stream_fn: None,
+        plugin_free_string,
+        user_data,
+    };
+    let ok = with_current_api(|api| {
+        api.with_registry(|registry| registry.register_protected_provider(record))
+            .is_some()
+    });
+    if ok == Some(true) {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Register a streaming provider with versioned protected credential controls.
+///
+/// # Parameters
+/// - `provider_id`: Stable provider identity.
+/// - `base_url`: Provider endpoint.
+/// - `api_style`: Provider protocol identifier.
+/// - `request_fn`: Protected streaming callback.
+/// - `plugin_free_string`: Deallocator for plugin-owned response strings.
+/// - `user_data`: Plugin-owned callback context.
+///
+/// # Returns
+/// Zero when registration succeeds; negative when the host rejects it.
+extern "C" fn trampoline_register_protected_streaming_provider(
+    provider_id: StbStringRef,
+    base_url: StbStringRef,
+    api_style: StbStringRef,
+    request_fn: ProtectedProviderStreamRequestFn,
+    plugin_free_string: FreeStringFn,
+    user_data: *mut c_void,
+) -> i32 {
+    if !current_api_present() {
+        return -1;
+    }
+    let record = crate::registry::RegisteredProvider {
+        provider_id: unsafe { provider_id.as_str().to_string() },
+        base_url: unsafe { base_url.as_str().to_string() },
+        api_style: unsafe { api_style.as_str().to_string() },
+        request_fn: unsupported_one_shot_provider_request,
+        protected_request_fn: None,
+        protected_stream_fn: Some(request_fn),
+        stream_fn: None,
+        plugin_free_string,
+        user_data,
+    };
+    let ok = with_current_api(|api| {
+        api.with_registry(|registry| registry.register_protected_streaming_provider(record))
+            .is_some()
+    });
     if ok == Some(true) {
         0
     } else {
@@ -633,6 +735,8 @@ extern "C" fn trampoline_register_streaming_provider(
         base_url: unsafe { base_url.as_str().to_string() },
         api_style: unsafe { api_style.as_str().to_string() },
         request_fn: unsupported_one_shot_provider_request,
+        protected_request_fn: None,
+        protected_stream_fn: None,
         stream_fn: Some(request_fn),
         plugin_free_string,
         user_data,

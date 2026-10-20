@@ -199,7 +199,7 @@ pub struct PreparedExtensions {
     catalog: ModelCatalog,
     runtime: tokio::runtime::Handle,
     tool_context: rpi_extensions::ToolCallContext,
-    action_host: Arc<crate::extensions_actions::HarnessActionHost>,
+    _action_host: Arc<crate::extensions_actions::HarnessActionHost>,
     harness_cell: Arc<std::sync::OnceLock<rpi_harness::agent_harness::WeakAgentHarness>>,
     reload_mailbox: rpi_extensions::ReloadMailbox,
     ui_dialog_mailbox: rpi_extensions::UiDialogMailbox,
@@ -300,7 +300,7 @@ pub fn prepare_extensions(
         runtime,
         catalog,
         tool_context,
-        action_host,
+        _action_host: action_host,
         harness_cell,
         reload_mailbox,
         ui_dialog_mailbox,
@@ -368,7 +368,7 @@ pub async fn build_prepared(
         runtime,
         tool_context,
         catalog,
-        action_host,
+        _action_host: _,
         harness_cell,
         reload_mailbox,
         ui_dialog_mailbox,
@@ -1300,32 +1300,17 @@ where
         report_deferred_renderers(&extension_session);
     }
 
-    let has_package_providers = |session: &ExtensionSession| {
-        session.snapshot().is_some_and(|snapshot| {
-            snapshot
-                .providers()
-                .iter()
-                .any(|provider| snapshot.provider_manifest(&provider.provider_id).is_some())
-        })
-    };
-    let packaged = has_package_providers(&extension_session)
-        || has_package_providers(&ctx.extension_session.lock().unwrap());
+    let previous_session = ctx.extension_session.lock().unwrap().clone();
+    let packaged =
+        rpi_extensions::requires_provider_catalog_refresh(&previous_session, &extension_session);
     let refreshed = if packaged {
         let mut args = effective_args.clone();
         if let Ok(current) = harness.lane("main").get_model().await {
-            let was_package = ctx
-                .extension_session
-                .lock()
-                .unwrap()
-                .snapshot()
-                .is_some_and(|snapshot| snapshot.provider_manifest(&current.provider).is_some());
-            let has_replacement = extension_session.snapshot().is_some_and(|snapshot| {
-                snapshot
-                    .providers()
-                    .iter()
-                    .any(|provider| provider.provider_id == current.provider)
-            });
-            if was_package && !has_replacement {
+            if rpi_extensions::active_provider_was_removed(
+                &current.provider,
+                &previous_session,
+                &extension_session,
+            ) {
                 return ReloadOutcome {
                     summary: "Reload failed while resolving provider packages".into(),
                     had_warnings: true,
@@ -1771,23 +1756,7 @@ fn build_models_with_extensions_for_reload(
     extension_session: &ExtensionSession,
     runtime: tokio::runtime::Handle,
 ) -> Vec<Arc<dyn Provider>> {
-    let mut models: Vec<Arc<dyn Provider>> = providers.to_vec();
-    let pluggable = rpi_extensions::PluggableProvider::from_session(extension_session, runtime);
-    for provider in pluggable {
-        // Declared packages must enter through credential-bound factories.
-        // Falling back to a raw adapter would reintroduce packages rejected by
-        // auth filtering and would discard their configured model snapshot.
-        if extension_session
-            .snapshot()
-            .is_some_and(|snapshot| snapshot.provider_manifest(provider.id()).is_some())
-        {
-            continue;
-        }
-        if !models.iter().any(|known| known.id() == provider.id()) {
-            models.push(provider);
-        }
-    }
-    models
+    rpi_extensions::providers_for_reload(providers, extension_session, runtime)
 }
 
 /// Diagnostic for registered TUI renderers. All three renderer kinds are
@@ -2829,6 +2798,8 @@ mod tests {
                 base_url: "http://localhost".into(),
                 api_style: "openai-completions".into(),
                 request_fn: request,
+                protected_request_fn: None,
+                protected_stream_fn: None,
                 stream_fn: None,
                 plugin_free_string: rpi_plugin_sdk::callbacks::free_string,
                 user_data: std::ptr::null_mut(),

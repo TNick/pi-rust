@@ -2360,6 +2360,7 @@ dependencies = [
  "rpi-harness",
  "rpi-model-runtime",
  "rpi-plugin-sdk",
+ "rpi-provider-runtime",
  "rpi-telemetry",
  "rpi-tools",
  "rpi-tui",
@@ -2434,6 +2435,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -2449,8 +2451,10 @@ dependencies = [
 name = "rpi-provider-runtime"
 version = "0.6.2"
 dependencies = [
+ "fs2",
  "reqwest",
  "rpi-ai",
+ "rpi-extensions",
  "rpi-plugin-sdk",
  "serde",
  "serde_json",

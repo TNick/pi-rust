@@ -27,7 +27,8 @@ use crate::event_stream::{
 };
 use crate::model::{Model, StreamingProtocolCompat};
 use crate::provider::{
-    reject_opaque_provider_options, CacheRetention, Provider, RequestSecret, SimpleStreamOptions,
+    reject_opaque_provider_options, report_applied_request_settings,
+    AppliedRequestSettingsCallback, CacheRetention, Provider, RequestSecret, SimpleStreamOptions,
 };
 use crate::types::{AssistantMessageEvent, Content, Context, DoneReason, StopReason, Usage};
 use async_trait::async_trait;
@@ -166,12 +167,47 @@ impl Provider for AnthropicProvider {
                 &model,
                 &ctx,
                 &opts,
+                None,
             )
             .await;
             // `prod` drops here, closing the mpsc sender so the consumer's
             // `next()` returns `None` after the terminal event.
         });
 
+        stream
+    }
+
+    async fn stream_simple_with_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        if let Some(stream) = reject_opaque_provider_options(model, "anthropic") {
+            return stream;
+        }
+        let (mut prod, stream) = create_assistant_message_event_stream();
+        let http = self.http.clone();
+        let provider_key = self.api_key.clone();
+        let allow_env_api_key = self.allow_env_api_key;
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let opts = opts.clone();
+        tokio::spawn(async move {
+            run_anthropic_stream(
+                &mut prod,
+                http,
+                provider_key,
+                allow_env_api_key,
+                None,
+                &model,
+                &ctx,
+                &opts,
+                Some(callback),
+            )
+            .await;
+        });
         stream
     }
 
@@ -214,10 +250,43 @@ impl Provider for AnthropicProvider {
                 &model,
                 &ctx,
                 &opts,
+                None,
             )
             .await;
         });
 
+        stream
+    }
+
+    async fn stream_simple_with_request_secret_and_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+        callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        let (mut prod, stream) = create_assistant_message_event_stream();
+        let http = self.http.clone();
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let opts = opts.clone();
+        let secret = secret.clone();
+        tokio::spawn(async move {
+            run_anthropic_stream(
+                &mut prod,
+                http,
+                None,
+                false,
+                Some((secret, bearer)),
+                &model,
+                &ctx,
+                &opts,
+                Some(callback),
+            )
+            .await;
+        });
         stream
     }
 }
@@ -257,6 +326,7 @@ async fn run_anthropic_stream(
     model: &Model,
     ctx: &Context,
     opts: &SimpleStreamOptions,
+    applied_settings_callback: Option<AppliedRequestSettingsCallback>,
 ) {
     let mut state = MapperState::new(
         model.api.clone(),
@@ -342,6 +412,7 @@ async fn run_anthropic_stream(
         strip_cache_control(&mut body);
         simplify_non_stream_request(&mut body);
     }
+    report_applied_request_settings(model, applied_settings_callback.as_ref(), &body);
 
     // ---- assemble headers (createClient, API-key arm) ----
     let headers = if protected_secret.is_some() {

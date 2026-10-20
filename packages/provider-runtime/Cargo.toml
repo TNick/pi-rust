@@ -13,6 +13,8 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
+fs2 = { workspace = true }
+rpi-extensions = { workspace = true }
 
 [dev-dependencies]
 tokio-util = { workspace = true }

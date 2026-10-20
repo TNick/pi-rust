@@ -11,6 +11,7 @@ use crate::types::{
 };
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -44,8 +45,132 @@ pub(crate) fn reject_opaque_provider_options(
     Some(stream)
 }
 
+/// Publishes an allowlisted projection of the final provider request body.
+///
+/// Values are read from the body after provider transformation. Prompt and
+/// content fields, headers, credentials, arbitrary sampling values, and
+/// provider-specific opaque fields are never copied. The report remains
+/// incomplete because transport headers and arbitrary body data are omitted.
+///
+/// # Parameters
+/// - `model`: Model descriptor used to prepare the request.
+/// - `callback`: Optional sink for the report.
+/// - `body`: Final JSON request body immediately before transport.
+pub(crate) fn report_applied_request_settings(
+    model: &Model,
+    callback: Option<&AppliedRequestSettingsCallback>,
+    body: &serde_json::Value,
+) {
+    let Some(callback) = callback else {
+        return;
+    };
+    let mut applied_values = BTreeMap::new();
+    for key in [
+        "model",
+        "temperature",
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "seed",
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "reasoning",
+        "thinking",
+        "stream",
+        "store",
+    ] {
+        if let Some(value) = body.get(key) {
+            let valid_scalar = match key {
+                "model" => value.is_string(),
+                "temperature" | "top_p" | "frequency_penalty" | "presence_penalty" => {
+                    value.is_number()
+                }
+                "seed" => value.as_i64().is_some() || value.as_u64().is_some(),
+                "max_tokens" | "max_completion_tokens" | "max_output_tokens" => {
+                    value.as_u64().is_some()
+                }
+                "stream" | "store" => value.is_boolean(),
+                _ => false,
+            };
+            if valid_scalar {
+                applied_values.insert(key.to_owned(), value.clone());
+            } else if key == "reasoning" {
+                if let Some(effort) = value.get("effort").filter(|value| value.is_string()) {
+                    applied_values.insert(key.to_owned(), serde_json::json!({ "effort": effort }));
+                }
+            } else if key == "thinking" {
+                let mut projection = serde_json::Map::new();
+                if let Some(kind) = value.get("type").filter(|value| value.is_string()) {
+                    projection.insert("type".to_owned(), kind.clone());
+                }
+                if let Some(budget) = value
+                    .get("budget_tokens")
+                    .filter(|value| value.as_u64().is_some())
+                {
+                    projection.insert("budget_tokens".to_owned(), budget.clone());
+                }
+                if !projection.is_empty() {
+                    applied_values.insert(key.to_owned(), projection.into());
+                }
+            }
+        }
+    }
+    callback(AppliedRequestSettings {
+        schema_version: "rpi-applied-request-settings-v1".to_owned(),
+        provider_id: model.provider.clone(),
+        model_id: model.id.clone(),
+        api_id: model.api.as_str().to_owned(),
+        applied_values,
+        omitted_categories: vec![
+            "endpoint".to_owned(),
+            "headers_and_credentials".to_owned(),
+            "prompt_and_transcript".to_owned(),
+            "tools_and_schemas".to_owned(),
+            "opaque_provider_options".to_owned(),
+            "unrecognized_request_fields".to_owned(),
+        ],
+        complete: false,
+    });
+}
+
 /// Default deadline for one LLM API request, including its streamed response.
 pub const DEFAULT_LLM_API_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Reports sanitized settings observed at a provider's final request boundary.
+///
+/// # Public members
+/// - `schema_version`: Version of this report contract.
+/// - `provider_id`: Provider identity used for the request.
+/// - `model_id`: Model identifier placed in the request.
+/// - `api_id`: Provider API identifier.
+/// - `applied_values`: Allowlisted scalar settings found in the final body.
+/// - `omitted_categories`: Sensitive or opaque request categories omitted.
+/// - `complete`: Whether every request-affecting setting is represented.
+///
+/// # Private members
+/// None.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedRequestSettings {
+    /// Version of this report contract.
+    pub schema_version: String,
+    /// Provider identity used by the request.
+    pub provider_id: String,
+    /// Model identifier used by the request.
+    pub model_id: String,
+    /// Provider API identifier.
+    pub api_id: String,
+    /// Sanitized allowlisted settings observed in the final request body.
+    pub applied_values: BTreeMap<String, serde_json::Value>,
+    /// Omitted request categories that may contain secrets or opaque data.
+    pub omitted_categories: Vec<String>,
+    /// Whether the report attests every request-affecting value.
+    pub complete: bool,
+}
+
+/// Callback invoked after a provider assembles the final JSON request body.
+pub type AppliedRequestSettingsCallback = Arc<dyn Fn(AppliedRequestSettings) + Send + Sync>;
 
 /// Cache-retention hint passed to a provider. Mirrors TS `CacheRetention`.
 /// `Long` requests 1h ephemeral cache control on Anthropic (subject to compat);
@@ -276,6 +401,30 @@ pub trait Provider: Send + Sync {
         opts: &SimpleStreamOptions,
     ) -> AssistantMessageEventStream;
 
+    /// Stream a request and report sanitized settings from its final body.
+    ///
+    /// Providers that do not expose request preparation keep their existing
+    /// behavior through this default. Built-in HTTP providers override it and
+    /// invoke the callback only after their final body transformations.
+    ///
+    /// # Parameters
+    /// - `model`: Model to execute.
+    /// - `ctx`: Prompt context.
+    /// - `opts`: Non-secret request options.
+    /// - `callback`: Sink for the versioned applied-settings report.
+    ///
+    /// # Returns
+    /// The provider response event stream.
+    async fn stream_simple_with_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        _callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        self.stream_simple(model, ctx, opts).await
+    }
+
     /// Streams with opaque host-protected request credentials when supported.
     ///
     /// Implementations must consume the secret only while constructing the
@@ -314,6 +463,31 @@ pub trait Provider: Send + Sync {
             error,
         });
         stream
+    }
+
+    /// Stream a protected-credential request and report its final body settings.
+    ///
+    /// # Parameters
+    /// - `model`: Model to execute.
+    /// - `ctx`: Prompt context.
+    /// - `opts`: Non-secret request options.
+    /// - `secret`: Opaque host-protected credential.
+    /// - `bearer`: Whether the credential uses bearer authorization.
+    /// - `callback`: Sink for the versioned applied-settings report.
+    ///
+    /// # Returns
+    /// The provider response event stream.
+    async fn stream_simple_with_request_secret_and_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+        _callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        self.stream_simple_with_request_secret(model, ctx, opts, secret, bearer)
+            .await
     }
 
     /// This provider's deferred-response capability, if it has one.

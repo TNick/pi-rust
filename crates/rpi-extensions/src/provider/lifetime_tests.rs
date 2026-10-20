@@ -45,6 +45,8 @@ fn runtime_shutdown_keeps_one_shot_provider_and_child_capacity_until_ffi_returns
                 base_url: "https://example".into(),
                 api_style: "faux".into(),
                 request_fn: paused_request,
+                protected_request_fn: None,
+                protected_stream_fn: None,
                 stream_fn: None,
                 plugin_free_string: rpi_plugin_sdk::callbacks::free_string,
                 user_data: Arc::into_raw(state.clone()) as *mut c_void,

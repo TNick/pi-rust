@@ -9,10 +9,11 @@ use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 
-const REGISTRY: &str = "packages.json";
-
 pub use rpi_extensions::ProjectPackage;
 use rpi_extensions::ProjectPackageRegistry as PackageRegistry;
+use rpi_provider_runtime::packages::read_project_registry;
+#[cfg(test)]
+use rpi_provider_runtime::packages::write_project_registry;
 
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
@@ -120,12 +121,6 @@ fn link(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let root = project_root.join(".rpi/packages").join(&package_name);
-    let ext = root.join("extensions");
-    if let Err(e) = std::fs::create_dir_all(&ext) {
-        eprintln!("error: could not create {}: {e}", ext.display());
-        return 1;
-    }
     let file = match artifact.file_name().and_then(|n| n.to_str()) {
         Some(n) => n.to_string(),
         None => {
@@ -133,42 +128,19 @@ fn link(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let target = ext.join(&file);
-    if target.exists() && !force {
-        eprintln!("error: package already exists; use --force");
-        return 1;
-    }
-    let tmp = ext.join(format!(".{file}.tmp"));
-    if force {
-        if let Err(e) = std::fs::remove_file(&target) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("error: could not replace existing package artifact: {e}");
-                return 1;
-            }
-        }
-    }
-    if let Err(e) = std::fs::copy(&artifact, &tmp).and_then(|_| std::fs::rename(&tmp, &target)) {
-        let _ = std::fs::remove_file(&tmp);
-        eprintln!("error: could not activate package: {e}");
-        return 1;
-    }
-    let mut registry = match read_registry(&project_root) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 1;
-        }
-    };
-    registry.packages.retain(|p| p.name != package_name);
-    registry.packages.push(ProjectPackage {
+    let package = ProjectPackage {
         name: package_name.clone(),
         version: selected.version,
         source: source.display().to_string(),
         cargo_package: selected.name,
         artifacts: vec![file],
-    });
-    registry.packages.sort_by(|a, b| a.name.cmp(&b.name));
-    if let Err(e) = write_registry(&project_root, &registry) {
+    };
+    if let Err(e) = rpi_provider_runtime::packages::install_project_artifact(
+        &project_root,
+        package,
+        &artifact,
+        force,
+    ) {
         eprintln!("error: {e}");
         return 1;
     }
@@ -388,24 +360,7 @@ fn unlink(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let mut registry = match read_registry(&cwd) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 1;
-        }
-    };
-    if !registry.packages.iter().any(|p| p.name == *name) {
-        eprintln!("error: project package `{name}` is not installed");
-        return 1;
-    }
-    let dir = cwd.join(".rpi/packages").join(name);
-    if let Err(e) = std::fs::remove_dir_all(&dir) {
-        eprintln!("error: could not remove package: {e}");
-        return 1;
-    }
-    registry.packages.retain(|p| p.name != *name);
-    if let Err(e) = write_registry(&cwd, &registry) {
+    if let Err(e) = rpi_provider_runtime::packages::uninstall_project_package(&cwd, name) {
         eprintln!("error: {e}");
         return 1;
     }
@@ -572,29 +527,15 @@ fn value(args: &[String], i: usize, flag: &str) -> Option<String> {
     }
 }
 fn read_registry(cwd: &Path) -> Result<PackageRegistry, String> {
-    let path = cwd.join(".rpi").join(REGISTRY);
-    match std::fs::read_to_string(path) {
-        Ok(s) => PackageRegistry::from_json(&s)
-            .map_err(|error| format!("invalid project package registry: {error}")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PackageRegistry::default()),
-        Err(e) => Err(e.to_string()),
-    }
+    read_project_registry(cwd)
 }
+#[cfg(test)]
 fn write_registry(cwd: &Path, r: &PackageRegistry) -> Result<(), String> {
-    let dir = cwd.join(".rpi");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(REGISTRY);
-    let tmp = dir.join(".packages.json.tmp");
-    let bytes = serde_json::to_vec_pretty(r).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(tmp, path).map_err(|e| e.to_string())
+    write_project_registry(cwd, r)
 }
 pub fn project_package_dirs(cwd: &Path, kind: &str) -> Vec<PathBuf> {
-    match read_registry(cwd) {
-        Ok(registry) => rpi_extensions::package_resource_dirs(
-            registry.package_roots(cwd.join(".rpi").join("packages")),
-            kind,
-        ),
+    match rpi_provider_runtime::packages::project_package_resource_dirs(cwd, kind) {
+        Ok(directories) => directories,
         Err(error) => {
             eprintln!("warning: could not load project package registry: {error}");
             Vec::new()

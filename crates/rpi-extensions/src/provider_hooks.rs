@@ -167,9 +167,8 @@ impl ProviderHooks for ExtensionProviderHooks {
             "baseUrl": model.base_url,
             "reasoning": model.reasoning,
             "pricingAvailable": model.has_pricing(),
-            "apiKey": opts.api_key,
             "timeoutMs": opts.timeout.map(|d| d.as_millis() as u64),
-            "headers": opts.headers,
+            "headers": redact_headers(opts.headers.as_ref()),
             "metadata": opts.metadata,
             "maxTokens": opts.max_tokens,
             "temperature": opts.temperature,
@@ -184,7 +183,9 @@ impl ProviderHooks for ExtensionProviderHooks {
             EventTag::BeforeProviderRequest,
             &request.to_string(),
         );
-        let headers = serde_json::json!({ "headers": opts.headers });
+        let headers = serde_json::json!({
+            "headers": redact_headers(opts.headers.as_ref())
+        });
         dispatch_data_event(
             &self.snapshot,
             EventTag::BeforeProviderHeaders,
@@ -203,6 +204,24 @@ impl ProviderHooks for ExtensionProviderHooks {
             &json.to_string(),
         );
     }
+}
+
+/// Preserve header names while replacing every value in events.
+///
+/// # Parameters
+/// - `headers`: Optional request headers observed by extension event handlers.
+///
+/// # Returns
+/// A cloned header map with every value replaced by a redaction marker.
+fn redact_headers(
+    headers: Option<&std::collections::BTreeMap<String, String>>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    headers.map(|headers| {
+        headers
+            .iter()
+            .map(|(name, _value)| (name.clone(), "[redacted]".to_owned()))
+            .collect()
+    })
 }
 
 /// The `before_agent_start` envelope: what the observer event carries and what

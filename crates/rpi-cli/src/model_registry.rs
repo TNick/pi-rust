@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 
-use rpi_ai::model::Model;
 use rpi_ai::Provider;
+use rpi_ai::model::Model;
 
 /// Model registry event types
 #[derive(Debug, Clone)]
@@ -91,11 +91,26 @@ pub struct ModelRegistry {
 impl ModelRegistry {
     /// Create a new model registry
     pub fn new() -> Self {
+        Self::with_catalog(rpi_model_runtime::ModelCatalog::new())
+    }
+
+    /// Create a CLI registry backed by a caller-owned shared model catalog.
+    ///
+    /// This lets CLI metadata and extension reloads observe the same catalog
+    /// snapshots and update notifications without moving configuration or
+    /// credential policy into the runtime crate.
+    ///
+    /// # Parameters
+    /// - `catalog`: Shared model catalog handle supplied by the host.
+    ///
+    /// # Returns
+    /// A registry whose model reads and refreshes use `catalog`.
+    pub fn with_catalog(catalog: rpi_model_runtime::ModelCatalog) -> Self {
         let (event_tx, _) = broadcast::channel(100);
         Self {
             providers: Arc::new(RwLock::new(indexmap::IndexMap::new())),
             provider_instances: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            catalog: rpi_model_runtime::ModelCatalog::new(),
+            catalog,
             event_tx,
             last_refresh: Arc::new(RwLock::new(None)),
         }
@@ -181,7 +196,7 @@ impl ModelRegistry {
             .write()
             .map_err(|_| RegistryError::LockPoisoned)?;
 
-        if providers.remove(provider_id).is_some() {
+        if providers.shift_remove(provider_id).is_some() {
             instances.remove(provider_id);
             self.catalog.remove_provider(provider_id);
             let _ = self
@@ -334,6 +349,7 @@ impl ModelRegistry {
             .read()
             .map_err(|_| RegistryError::LockPoisoned)?;
 
+        let previous_provider_ids = records.keys().cloned().collect::<Vec<_>>();
         let mut unconfigured_records = std::mem::take(&mut *records);
         let mut next_records = indexmap::IndexMap::new();
         let mut next_models = indexmap::IndexMap::<String, Vec<Model>>::new();
@@ -375,10 +391,16 @@ impl ModelRegistry {
             next_records.insert(provider_id, record);
         }
 
+        let mut model_changes = next_models
+            .into_iter()
+            .map(|(provider_id, models)| (provider_id, Some(models)))
+            .collect::<indexmap::IndexMap<_, _>>();
+        for provider_id in previous_provider_ids {
+            model_changes.entry(provider_id).or_insert(None);
+        }
         *records = next_records;
 
-        self.catalog
-            .reconcile_models(next_models.into_values().flatten().collect());
+        self.catalog.reconcile_provider_changes(model_changes);
         Ok(())
     }
 
@@ -518,9 +540,11 @@ mod tests {
     fn test_provider_registration() {
         let registry = ModelRegistry::new();
 
-        assert!(registry
-            .register_builtin_provider("test".to_string(), "Test Provider".to_string(), vec![])
-            .is_ok());
+        assert!(
+            registry
+                .register_builtin_provider("test".to_string(), "Test Provider".to_string(), vec![])
+                .is_ok()
+        );
         assert_eq!(registry.provider_count(), 1);
         assert!(registry.has_provider("test"));
     }
@@ -693,9 +717,11 @@ mod tests {
             .register_builtin_provider("test".to_string(), "Test Provider".to_string(), vec![])
             .unwrap();
 
-        assert!(registry
-            .update_auth_status("test", AuthStatus::Authenticated)
-            .is_ok());
+        assert!(
+            registry
+                .update_auth_status("test", AuthStatus::Authenticated)
+                .is_ok()
+        );
         assert_eq!(
             registry.get_auth_status("test"),
             Some(AuthStatus::Authenticated)

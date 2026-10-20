@@ -1176,16 +1176,40 @@ pub type RenderFn =
 /// omitted when empty. Providers should validate values they consume.
 /// `providerOptions` is runtime-only extension input, not a credential channel:
 /// never put credentials, authorization headers, or other secrets in it. Treat
-/// the existing `options` object as privileged input too: it may contain
-/// `apiKey` and headers, and must not be logged or persisted.
+/// The JSON `options` object excludes credentials and request-header values.
+/// Protected one-shot and streaming registrations receive those values through
+/// [`ProtectedProviderControl`]; legacy registrations fail closed when either
+/// input is present. Credentials are never sent as JSON `apiKey`.
 ///
 /// **One-shot.** The plugin returns the complete assistant message and the host
 /// emits it as a single terminal chunk (no progressive rendering). A provider
 /// that can stream should use [`ProviderStreamRequestFn`] via
 /// `register_streaming_provider` instead; both slots stay registered so an
-/// existing plugin keeps its behavior unchanged.
+/// existing plugin keeps its behavior unchanged. A one-shot provider that needs
+/// host-managed credentials must register with `register_protected_provider`;
+/// the legacy callback never receives credentials in its JSON envelope.
 pub type ProviderRequestFn =
     extern "C" fn(req_json: StbStringRef, out: *mut StbString, user_data: *mut c_void) -> i32;
+
+/// A one-shot provider callback with a protected credential control channel.
+///
+/// The request envelope is identical to [`ProviderRequestFn`], but credentials
+/// are exposed through `control` and never serialized as JSON `apiKey`.
+///
+/// # Parameters
+/// - `req_json`: Borrowed non-secret provider request envelope.
+/// - `control`: Host-owned protected request control, valid for this call.
+/// - `out`: Writable slot for the plugin-owned assistant-message response.
+/// - `user_data`: Opaque value supplied when the provider was registered.
+///
+/// # Returns
+/// Zero on success; nonzero when the provider request fails.
+pub type ProtectedProviderRequestFn = extern "C" fn(
+    req_json: StbStringRef,
+    control: *const ProtectedProviderControl,
+    out: *mut StbString,
+    user_data: *mut c_void,
+) -> i32;
 
 /// Chunk kind for [`ProviderStreamControl::is_cancelled`]. **Appended last** so a
 /// plugin compiled against an older, shorter struct reads only the fields it
@@ -1239,6 +1263,107 @@ pub struct ProviderStreamControl {
     /// always present in the snapshot and never holds another lock.
     pub wait_cancelled_ms: extern "C" fn(user_data: *mut c_void, timeout_ms: u32) -> i32,
     /// Host-owned opaque handle, passed back unchanged to both fields above.
+    pub user_data: *mut c_void,
+}
+
+/// Receives a borrowed credential through the protected provider control path.
+///
+/// The host calls this only while `with_request_secret` is active; `secret` is
+/// valid for that synchronous callback and must not be retained.
+///
+/// # Parameters
+/// - `secret`: Borrowed credential bytes represented as a string view.
+/// - `user_data`: Plugin-owned value supplied to [`ProviderSecretFn`].
+///
+/// # Returns
+/// Zero when the credential was consumed successfully; nonzero on failure.
+pub type ProviderSecretConsumerFn =
+    extern "C" fn(secret: StbStringRef, user_data: *mut c_void) -> i32;
+
+/// Exposes the current request credential synchronously to a protected plugin.
+///
+/// Returns `0` when a credential was supplied and consumed, or nonzero when no
+/// credential is available or the callback fails.
+///
+/// # Parameters
+/// - `consumer`: Synchronous callback that uses the credential.
+/// - `consumer_user_data`: Opaque value passed to `consumer`.
+/// - `control_user_data`: Host control handle supplied in
+///   [`ProtectedProviderControl`].
+///
+/// # Returns
+/// Zero on successful consumption; nonzero when unavailable or failed.
+pub type ProviderSecretFn = extern "C" fn(
+    consumer: ProviderSecretConsumerFn,
+    consumer_user_data: *mut c_void,
+    control_user_data: *mut c_void,
+) -> i32;
+
+/// Header source for [`ProviderHeaderConsumerFn`].
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderHeaderSource {
+    /// Header originally attached to the selected model.
+    Model = 0,
+    /// Header supplied through per-request options.
+    RequestOptions = 1,
+}
+
+/// Receives one borrowed request header from the protected header callback.
+///
+/// Both string views are valid only for this synchronous invocation.
+///
+/// # Parameters
+/// - `source`: Whether the header came from model or request options.
+/// - `name`: Borrowed header name.
+/// - `value`: Borrowed header value.
+/// - `user_data`: Plugin-owned consumer context.
+///
+/// # Returns
+/// Zero when consumed successfully; nonzero when the consumer fails.
+pub type ProviderHeaderConsumerFn = extern "C" fn(
+    source: u32,
+    name: StbStringRef,
+    value: StbStringRef,
+    user_data: *mut c_void,
+) -> i32;
+
+/// Synchronously exposes the request's model and per-request headers.
+///
+/// Header values remain borrowed for each consumer invocation and must not be
+/// retained or logged.
+///
+/// # Parameters
+/// - `consumer`: Callback invoked once per header.
+/// - `consumer_user_data`: Plugin-owned value passed to the consumer.
+/// - `control_user_data`: Handle passed in [`ProtectedProviderControl`].
+///
+/// # Returns
+/// Zero when all headers are consumed; nonzero if unavailable or rejected.
+pub type ProviderHeadersFn = extern "C" fn(
+    consumer: ProviderHeaderConsumerFn,
+    consumer_user_data: *mut c_void,
+    control_user_data: *mut c_void,
+) -> i32;
+
+/// Versioned protected input available only to protected provider callbacks.
+///
+/// The host passes this struct only through appended protected registration
+/// slots. Check `struct_size` before using fields added by a future version.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProtectedProviderControl {
+    /// Byte size of the initialized control layout.
+    pub struct_size: u32,
+    /// Cancellation controls for protected streaming providers.
+    pub stream: ProviderStreamControl,
+    /// Synchronously lends the protected request credential when available.
+    pub with_request_secret: Option<ProviderSecretFn>,
+    /// Whether the protected credential uses bearer authorization.
+    pub request_secret_bearer: bool,
+    /// Synchronously lends request headers when available.
+    pub with_request_headers: Option<ProviderHeadersFn>,
+    /// Opaque host handle passed back to credential/header callbacks.
     pub user_data: *mut c_void,
 }
 
@@ -1337,6 +1462,31 @@ pub type ProviderStreamRequestFn = extern "C" fn(
     completion: Option<ProviderStreamCompletionFn>,
     completion_user_data: *mut c_void,
     out: *mut StbString,
+    user_data: *mut c_void,
+) -> i32;
+
+/// Protected streaming provider callback using versioned credential control.
+///
+/// Its parameters and response contract match [`ProviderStreamRequestFn`],
+/// except `control` points to [`ProtectedProviderControl`].
+pub type ProtectedProviderStreamRequestFn = extern "C" fn(
+    req_json: StbStringRef,
+    emit: Option<ProviderStreamEmitFn>,
+    emit_user_data: *mut c_void,
+    control: *const ProtectedProviderControl,
+    completion: Option<ProviderStreamCompletionFn>,
+    completion_user_data: *mut c_void,
+    out: *mut StbString,
+    user_data: *mut c_void,
+) -> i32;
+
+/// Register a protected streaming provider using the versioned control ABI.
+pub type ProtectedStreamingProviderRegisterFn = extern "C" fn(
+    provider_id: StbStringRef,
+    base_url: StbStringRef,
+    api_style: StbStringRef,
+    request_fn: ProtectedProviderStreamRequestFn,
+    plugin_free_string: FreeStringFn,
     user_data: *mut c_void,
 ) -> i32;
 
@@ -1466,11 +1616,10 @@ pub struct PluginApi {
     /// Register a system-prompt transformer for the run (pi's
     /// `before_agent_start` returning `systemPrompt`).
     ///
-    /// **Appended last on purpose.** A plugin compiled against a shorter
-    /// `PluginApi` indexes every earlier field by offset, so a slot inserted in
-    /// the middle would make an old plugin read the new host's fields at the
-    /// wrong offsets. Appending keeps every existing offset valid, which is what
-    /// lets this ship without an ABI version bump; a plugin checks
+    /// Appended after the mandatory fields on purpose. A plugin compiled against
+    /// a shorter `PluginApi` indexes every earlier field by offset, so a slot
+    /// inserted in the middle would make an old plugin read new host fields at
+    /// the wrong offsets. Appending keeps existing offsets valid; a plugin checks
     /// `struct_size` (or the slot for `None`) before using it.
     ///
     /// Nullable: a host that predates this slot leaves it `None`, the plugin
@@ -1519,6 +1668,24 @@ pub struct PluginApi {
             user_data: *mut c_void,
         ) -> i32,
     >,
+    /// Register a one-shot provider that can consume protected credentials.
+    /// Appended after `register_streaming_provider` to preserve prior offsets.
+    /// Read this slot only when `struct_size` reaches the end of this field;
+    /// older hosts may provide a shorter allocation, not a readable `None`.
+    pub register_protected_provider: Option<
+        extern "C" fn(
+            provider_id: StbStringRef,
+            base_url: StbStringRef,
+            api_style: StbStringRef,
+            request_fn: ProtectedProviderRequestFn,
+            plugin_free_string: FreeStringFn,
+            user_data: *mut c_void,
+        ) -> i32,
+    >,
+    /// Register streaming with protected credentials and request headers.
+    /// Read this slot only when `struct_size` reaches the end of this field;
+    /// its presence negotiates the versioned protected control ABI.
+    pub register_protected_streaming_provider: Option<ProtectedStreamingProviderRegisterFn>,
 }
 unsafe impl Send for PluginApi {}
 unsafe impl Sync for PluginApi {}
@@ -1908,6 +2075,8 @@ mod tests {
             register_before_agent_start: None,
             register_oauth_provider: None,
             register_streaming_provider: None,
+            register_protected_provider: None,
+            register_protected_streaming_provider: None,
         };
         // All optional slots are null → plugin must degrade.
         assert!(api.register_tool.is_none());
@@ -1984,7 +2153,9 @@ mod tests {
             "register_streaming_provider must be appended after register_oauth_provider \
              so an older plugin's every offset stays valid"
         );
+        let protected_slot = core::mem::offset_of!(PluginApi, register_protected_provider);
         assert_eq!(
+            protected_slot,
             streaming_slot
                 + size_of::<
                     Option<
@@ -1998,8 +2169,31 @@ mod tests {
                         ) -> i32,
                     >,
                 >(),
+            "register_protected_provider must follow the streaming registrar"
+        );
+        let protected_streaming_slot =
+            core::mem::offset_of!(PluginApi, register_protected_streaming_provider);
+        assert_eq!(
+            protected_streaming_slot,
+            protected_slot
+                + size_of::<
+                    Option<
+                        extern "C" fn(
+                            StbStringRef,
+                            StbStringRef,
+                            StbStringRef,
+                            ProtectedProviderRequestFn,
+                            FreeStringFn,
+                            *mut c_void,
+                        ) -> i32,
+                    >,
+                >(),
+            "register_protected_streaming_provider must follow the protected one-shot slot"
+        );
+        assert_eq!(
+            protected_streaming_slot + size_of::<Option<ProtectedStreamingProviderRegisterFn>>(),
             size_of::<PluginApi>(),
-            "register_streaming_provider is the last slot; anything after it is a bug"
+            "protected streaming registration must remain the final appended slot"
         );
         assert_eq!(align_of::<PluginApi>(), align_of::<*const ()>());
     }
@@ -2073,6 +2267,8 @@ mod tests {
             register_before_agent_start: None,
             register_oauth_provider: None,
             register_streaming_provider: None,
+            register_protected_provider: None,
+            register_protected_streaming_provider: None,
         }
     }
 

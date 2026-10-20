@@ -156,6 +156,59 @@ impl ModelCatalog {
         revision
     }
 
+    /// Atomically replaces an ordered provider slice and retains other rows.
+    ///
+    /// Rows outside the supplied slice remain present and precede the new
+    /// slice. This lets a host component update its providers without deleting
+    /// catalog rows owned by other components.
+    ///
+    /// # Parameters
+    /// - `changes`: Ordered provider rows to replace, or `None` to remove that
+    ///   provider.
+    ///
+    /// # Returns
+    /// The revision after applying the changes.
+    pub fn reconcile_provider_changes(&self, changes: IndexMap<String, Option<Vec<Model>>>) -> u64 {
+        let mut state = self
+            .inner
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = state
+            .providers
+            .iter()
+            .filter(|(provider_id, _)| !changes.contains_key(*provider_id))
+            .map(|(provider_id, models)| (provider_id.clone(), models.clone()))
+            .collect::<IndexMap<_, _>>();
+        for (provider_id, models) in changes {
+            if let Some(models) = models {
+                next.insert(provider_id, models);
+            }
+        }
+        let mut changed_ids = state
+            .providers
+            .keys()
+            .chain(next.keys())
+            .filter(|provider_id| state.providers.get(*provider_id) != next.get(*provider_id))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if !state.providers.keys().eq(next.keys()) {
+            changed_ids.extend(state.providers.keys().chain(next.keys()).cloned());
+        }
+        if changed_ids.is_empty() {
+            return state.revision;
+        }
+        let changed_ids = changed_ids.into_iter().collect::<Vec<_>>();
+        state.providers = next;
+        state.revision = state.revision.saturating_add(1);
+        let revision = state.revision;
+        let _ = self.inner.events.send(ModelCatalogEvent {
+            revision,
+            provider_ids: changed_ids,
+        });
+        revision
+    }
+
     /// Reconciles a flat provider/model list while preserving first-seen order.
     ///
     /// Models are grouped by their upstream provider identity. Provider order
@@ -191,7 +244,7 @@ impl ModelCatalog {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.providers.remove(provider_id).is_none() {
+        if state.providers.shift_remove(provider_id).is_none() {
             return false;
         }
         state.revision = state.revision.saturating_add(1);

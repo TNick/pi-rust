@@ -16,7 +16,8 @@ use crate::event_stream::{
 };
 use crate::model::{MaxTokensField, Model, StreamingProtocolCompat};
 use crate::provider::{
-    reject_opaque_provider_options, Provider, RequestSecret, SimpleStreamOptions,
+    reject_opaque_provider_options, report_applied_request_settings,
+    AppliedRequestSettingsCallback, Provider, RequestSecret, SimpleStreamOptions,
 };
 use crate::providers::anthropic::cost::calculate_cost;
 use crate::providers::anthropic::json_parse::parse_streaming_json;
@@ -130,10 +131,47 @@ impl Provider for OpenAiCompletionsProvider {
                 &model,
                 &ctx,
                 &opts,
+                None,
             )
             .await;
         });
 
+        stream
+    }
+
+    async fn stream_simple_with_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        if let Some(stream) = reject_opaque_provider_options(model, &self.id) {
+            return stream;
+        }
+        let (mut producer, stream) = create_assistant_message_event_stream();
+        let http = self.http.clone();
+        let provider_key = self.api_key.clone();
+        let allow_env_api_key = self.allow_env_api_key;
+        let require_auth = self.require_auth;
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let opts = opts.clone();
+        tokio::spawn(async move {
+            run_stream(
+                &mut producer,
+                http,
+                provider_key,
+                allow_env_api_key,
+                require_auth,
+                None,
+                &model,
+                &ctx,
+                &opts,
+                Some(callback),
+            )
+            .await;
+        });
         stream
     }
 
@@ -175,10 +213,45 @@ impl Provider for OpenAiCompletionsProvider {
                 &model,
                 &ctx,
                 &opts,
+                None,
             )
             .await;
         });
 
+        stream
+    }
+
+    async fn stream_simple_with_request_secret_and_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+        callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        let (mut producer, stream) = create_assistant_message_event_stream();
+        let http = self.http.clone();
+        let require_auth = self.require_auth;
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let opts = opts.clone();
+        let secret = secret.clone();
+        tokio::spawn(async move {
+            run_stream(
+                &mut producer,
+                http,
+                None,
+                false,
+                require_auth,
+                Some((secret, bearer)),
+                &model,
+                &ctx,
+                &opts,
+                Some(callback),
+            )
+            .await;
+        });
         stream
     }
 }
@@ -205,6 +278,7 @@ async fn run_stream(
     model: &Model,
     ctx: &Context,
     opts: &SimpleStreamOptions,
+    applied_settings_callback: Option<AppliedRequestSettingsCallback>,
 ) {
     let mut state = StreamState::new(model);
     let protected_secret = match request_secret {
@@ -260,6 +334,7 @@ async fn run_stream(
     }
 
     let body = build_request(model, ctx, opts);
+    report_applied_request_settings(model, applied_settings_callback.as_ref(), &body);
     let url = chat_completions_url(&model.base_url);
     // A silent/stalled gateway must not leave the harness in Working forever.
     // Callers can override this through SimpleStreamOptions when needed.

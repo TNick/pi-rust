@@ -5,7 +5,10 @@ use crate::event_stream::{
     AssistantMessageEventStreamProducer,
 };
 use crate::model::{Model, StreamingProtocolCompat};
-use crate::provider::{reject_opaque_provider_options, Provider, SimpleStreamOptions};
+use crate::provider::{
+    reject_opaque_provider_options, report_applied_request_settings,
+    AppliedRequestSettingsCallback, Provider, RequestSecret, SimpleStreamOptions,
+};
 use crate::providers::anthropic::cost::calculate_cost;
 use crate::providers::anthropic::json_parse::parse_streaming_json;
 use crate::providers::anthropic::retry::retry_provider_request;
@@ -22,6 +25,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 pub struct OpenAiResponsesProvider {
     id: String,
@@ -119,6 +123,114 @@ impl Provider for OpenAiResponsesProvider {
                 &model,
                 &ctx,
                 &opts,
+                None,
+                None,
+            )
+            .await;
+        });
+        stream
+    }
+
+    async fn stream_simple_with_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        if let Some(stream) = reject_opaque_provider_options(model, &self.id) {
+            return stream;
+        }
+        let (mut producer, stream) = create_assistant_message_event_stream();
+        let http = self.http.clone();
+        let key = self.api_key.clone();
+        let allow_env_api_key = self.allow_env_api_key;
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let opts = opts.clone();
+        tokio::spawn(async move {
+            run_stream(
+                &mut producer,
+                http,
+                key,
+                allow_env_api_key,
+                &model,
+                &ctx,
+                &opts,
+                Some(callback),
+                None,
+            )
+            .await;
+        });
+        stream
+    }
+
+    async fn stream_simple_with_request_secret(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+    ) -> AssistantMessageEventStream {
+        self.stream_with_request_secret(model, ctx, opts, secret, bearer, None)
+    }
+
+    async fn stream_simple_with_request_secret_and_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+        callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        self.stream_with_request_secret(model, ctx, opts, secret, bearer, Some(callback))
+    }
+}
+
+impl OpenAiResponsesProvider {
+    /// Starts a Responses request using host-protected credential material.
+    ///
+    /// # Parameters
+    /// - `model`: Model receiving the request.
+    /// - `ctx`: Provider-neutral request context.
+    /// - `opts`: Non-secret request options.
+    /// - `secret`: Opaque host-protected API credential.
+    /// - `bearer`: Whether to use Bearer authorization instead of `x-api-key`.
+    /// - `callback`: Optional sink for applied request settings.
+    ///
+    /// # Returns
+    /// The asynchronous Responses API event stream.
+    fn stream_with_request_secret(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+        callback: Option<AppliedRequestSettingsCallback>,
+    ) -> AssistantMessageEventStream {
+        if let Some(stream) = reject_opaque_provider_options(model, &self.id) {
+            return stream;
+        }
+        let (mut producer, stream) = create_assistant_message_event_stream();
+        let http = self.http.clone();
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let opts = opts.clone();
+        let secret = secret.clone();
+        tokio::spawn(async move {
+            run_stream(
+                &mut producer,
+                http,
+                None,
+                false,
+                &model,
+                &ctx,
+                &opts,
+                callback,
+                Some((secret, bearer)),
             )
             .await;
         });
@@ -1152,6 +1264,37 @@ fn apply_api_key(
     }
 }
 
+/// Identifies caller-provided credentials superseded by protected auth.
+///
+/// # Parameters
+/// - `name`: Header name to inspect.
+///
+/// # Returns
+/// Whether the header carries a credential that must not be copied or sent.
+fn is_protected_auth_header(name: &str) -> bool {
+    [
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "cf-aig-authorization",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+/// Runs one Responses request and forwards normalized stream events.
+///
+/// # Parameters
+/// - `p`: Event-stream producer for this invocation.
+/// - `http`: HTTP client configured by the provider.
+/// - `provider_key`: Legacy provider-owned credential.
+/// - `allow_env_api_key`: Whether provider credential resolution may read env.
+/// - `model`: Model descriptor for this invocation.
+/// - `ctx`: Provider-neutral request context.
+/// - `opts`: Non-secret request options.
+/// - `applied_settings_callback`: Optional sink for the prepared-body report.
+/// - `request_secret`: Optional host-protected credential and auth mode.
 async fn run_stream(
     p: &mut AssistantMessageEventStreamProducer,
     http: reqwest::Client,
@@ -1160,6 +1303,8 @@ async fn run_stream(
     model: &Model,
     ctx: &Context,
     opts: &SimpleStreamOptions,
+    applied_settings_callback: Option<AppliedRequestSettingsCallback>,
+    request_secret: Option<(RequestSecret, bool)>,
 ) {
     let mut out = AssistantMessage::empty(
         Api::OpenaiResponses,
@@ -1167,27 +1312,74 @@ async fn run_stream(
         model.id.clone(),
         now_ms(),
     );
+    let protected_secret = match request_secret {
+        Some((secret, bearer)) => {
+            let mut present = false;
+            secret.with_secret(&mut |value| present = !value.trim().is_empty());
+            if !present {
+                emit_error(p, &mut out, "Protected provider credential is empty", false);
+                return;
+            }
+            Some((secret, bearer))
+        }
+        None => None,
+    };
     let mut headers = model.headers.clone().unwrap_or_default();
+    if protected_secret.is_some() {
+        headers.retain(|name, _| !is_protected_auth_header(name));
+    }
     if let Some(extra) = &opts.headers {
         for (k, v) in extra {
-            headers.insert(k.clone(), v.clone());
+            if protected_secret.is_none() || !is_protected_auth_header(k) {
+                headers.insert(k.clone(), v.clone());
+            }
         }
     }
-    let key = resolve_api_key(&provider_key, opts, allow_env_api_key);
-    apply_api_key(&mut headers, key);
+    if protected_secret.is_none() {
+        let key = resolve_api_key(&provider_key, opts, allow_env_api_key);
+        apply_api_key(&mut headers, key);
+    }
     if !headers
         .keys()
         .any(|k| k.eq_ignore_ascii_case("authorization") || k.eq_ignore_ascii_case("x-api-key"))
+        && protected_secret.is_none()
     {
         emit_error(p, &mut out, "No API key", false);
         return;
     }
     let body = build_request(model, ctx, opts);
+    report_applied_request_settings(model, applied_settings_callback.as_ref(), &body);
     let url = responses_url(&model.base_url);
     let timeout = opts.request_timeout();
     let signal = opts.signal.clone();
-    let response = retry_provider_request(move || { let http=http.clone(); let url=url.clone(); let body=body.clone(); let headers=headers.clone(); let signal=signal.clone(); async move {
+    let response = retry_provider_request(move || { let http=http.clone(); let url=url.clone(); let body=body.clone(); let headers=headers.clone(); let signal=signal.clone(); let protected_secret=protected_secret.clone(); async move {
         let mut req=http.post(&url).json(&body).timeout(timeout); for (k,v) in headers { req=req.header(k,v); }
+        if let Some((secret, bearer)) = protected_secret {
+            let mut auth_header = None;
+            secret.with_secret(&mut |value| {
+                if value.trim().is_empty() {
+                    return;
+                }
+                let mut bytes = Zeroizing::new(Vec::with_capacity(value.len() + 7));
+                let name = if bearer {
+                    bytes.extend_from_slice(b"Bearer ");
+                    "authorization"
+                } else {
+                    "x-api-key"
+                };
+                bytes.extend_from_slice(value.as_bytes());
+                if let Ok(mut header) = reqwest::header::HeaderValue::from_bytes(&bytes) {
+                    header.set_sensitive(true);
+                    auth_header = Some((name, header));
+                }
+            });
+            let Some((name, header)) = auth_header else {
+                return Err(AiError::Auth {
+                    message: "invalid protected provider credential".into(),
+                });
+            };
+            req = req.header(name, header);
+        }
         let response = tokio::select! { r=req.send()=>r.map_err(|e| AiError::Http{status:None,message:e.to_string()})?, _=signal.cancelled()=>return Err(AiError::Abort{message:"Request aborted".into()})};
         if response.status().is_success() { Ok(response) } else { let status=response.status().as_u16(); let msg=response.text().await.unwrap_or_default(); Err(AiError::Http{status:Some(status),message:msg}) }
     }}, opts.max_retries, opts.max_retry_delay, &opts.signal).await;

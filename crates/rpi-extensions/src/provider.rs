@@ -44,8 +44,9 @@ use std::time::Duration;
 use rpi_ai::event_stream::create_assistant_message_event_stream;
 use rpi_ai::types::{AssistantMessage, Content, DoneReason, ErrorReason, ToolCall, ToolCallType};
 use rpi_ai::{
-    AssistantMessageEvent, AssistantMessageEventStream, AssistantMessageEventStreamProducer,
-    Context, Model, Provider, SimpleStreamOptions,
+    AppliedRequestSettings, AppliedRequestSettingsCallback, AssistantMessageEvent,
+    AssistantMessageEventStream, AssistantMessageEventStreamProducer, Context, Model, Provider,
+    RequestSecret, SecretMaterial, SimpleStreamOptions,
 };
 use rpi_plugin_sdk::callbacks::OwnedString;
 use rpi_plugin_sdk::{StbString, StbStringRef};
@@ -65,6 +66,22 @@ mod stream_tests;
 struct ProviderRequestLifetime {
     _keepalive: Arc<PluginKeepalive>,
     _background: Option<rpi_agent::tool_execution_scope::BackgroundToolGuard>,
+}
+
+/// Owns a legacy options credential while routing it over the protected path.
+///
+/// Attributes:
+/// - `0`: Credential string retained for the synchronous plugin request.
+struct OptionsSecret(String);
+
+impl SecretMaterial for OptionsSecret {
+    /// Lend the credential only for the synchronous consumer callback.
+    ///
+    /// # Parameters
+    /// - `consumer`: Request code that consumes the credential.
+    fn with_secret(&self, consumer: &mut dyn FnMut(&str)) {
+        consumer(&self.0);
+    }
 }
 impl ProviderRequestLifetime {
     fn new(keepalive: Arc<PluginKeepalive>) -> Self {
@@ -142,6 +159,121 @@ impl PluggableProvider {
             })
             .collect()
     }
+
+    /// Stream a provider request with an opaque host-protected credential.
+    ///
+    /// # Parameters
+    /// - `model`: Model to execute.
+    /// - `ctx`: Prompt context.
+    /// - `opts`: Non-secret request options.
+    /// - `secret`: Opaque credential handle.
+    ///
+    /// # Returns
+    /// The provider response stream, or an error stream if this extension uses
+    /// the one-shot ABI, which has no protected credential channel.
+    async fn stream_with_secret(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: Option<(RequestSecret, bool)>,
+        applied_settings_callback: Option<AppliedRequestSettingsCallback>,
+    ) -> AssistantMessageEventStream {
+        let (mut prod, stream) = create_assistant_message_event_stream();
+        let snapshot = Arc::clone(&self.snapshot);
+        let record = self.record.clone();
+        let runtime = self.runtime.clone();
+        let lifetime = ProviderRequestLifetime::new(Arc::clone(&self._keepalive));
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let mut opts = opts.clone();
+        opts.api_key = None;
+        let provider_options_v1 = self.provider_options_v1;
+
+        tokio::spawn(async move {
+            let message = if !provider_options_v1 && !model.provider_options.is_empty() {
+                AssistantMessage::terminal(
+                    model.api.clone(),
+                    record.provider_id.clone(),
+                    model.id.clone(),
+                    rpi_ai::types::StopReason::Error,
+                    "extension provider does not declare providerOptions version 1",
+                    0,
+                )
+            } else if let Some(stream_fn) = record.protected_stream_fn {
+                drive_streaming_plugin_provider(
+                    &snapshot,
+                    &record,
+                    StreamProviderCallback::Protected(stream_fn),
+                    runtime,
+                    lifetime,
+                    &model,
+                    &ctx,
+                    &opts,
+                    secret,
+                    &mut prod,
+                )
+                .await
+            } else if let Some(stream_fn) = record
+                .stream_fn
+                .filter(|_| secret.is_none() && !request_has_headers(&model, &opts))
+            {
+                drive_streaming_plugin_provider(
+                    &snapshot,
+                    &record,
+                    StreamProviderCallback::Legacy(stream_fn),
+                    runtime,
+                    lifetime,
+                    &model,
+                    &ctx,
+                    &opts,
+                    secret,
+                    &mut prod,
+                )
+                .await
+            } else {
+                match (secret, record.protected_request_fn) {
+                    (Some((secret, bearer)), Some(request_fn)) => {
+                        drive_protected_plugin_provider(
+                            &snapshot,
+                            &record,
+                            request_fn,
+                            runtime,
+                            lifetime,
+                            &model,
+                            &ctx,
+                            &opts,
+                            Some(secret),
+                            bearer,
+                        )
+                        .await
+                    }
+                    (None, Some(request_fn)) => {
+                        drive_protected_plugin_provider(
+                            &snapshot, &record, request_fn, runtime, lifetime, &model, &ctx, &opts,
+                            None, false,
+                        )
+                        .await
+                    }
+                    (Some(_), None) => credential_unsupported_message(&model, &record.provider_id),
+                    (None, None) if request_has_headers(&model, &opts) => {
+                        credential_unsupported_message(&model, &record.provider_id)
+                    }
+                    (None, None) => {
+                        drive_plugin_provider(
+                            &snapshot, &record, runtime, lifetime, &model, &ctx, &opts,
+                        )
+                        .await
+                    }
+                }
+            };
+            if let Some(callback) = applied_settings_callback {
+                callback(incomplete_applied_settings_report(&model));
+            }
+            push_terminal(&mut prod, message);
+        });
+        stream
+    }
 }
 
 #[async_trait::async_trait]
@@ -160,65 +292,95 @@ impl Provider for PluggableProvider {
         ctx: &Context,
         opts: &SimpleStreamOptions,
     ) -> AssistantMessageEventStream {
-        let (mut prod, stream) = create_assistant_message_event_stream();
-        let snapshot = Arc::clone(&self.snapshot);
-        // into_owned_record copies the fn pointers + owned strings; the
-        // `user_data` raw pointer is carried (plugin-owned, valid for the
-        // keepalive lifetime).
-        let record = self.record.clone();
-        let runtime = self.runtime.clone();
-        let lifetime = ProviderRequestLifetime::new(Arc::clone(&self._keepalive));
-        let model = model.clone();
-        let ctx = Arc::new(ctx.clone());
-        // `opts` is not `Clone`-free of lifetime — capture the fields the
-        // request envelope needs as owned values so the spawned task is
-        // `'static`. `SimpleStreamOptions` IS `Clone` (verified, provider.rs:27),
-        // so a single clone carries every field into the task.
-        let opts = opts.clone();
-        let provider_options_v1 = self.provider_options_v1;
+        let secret = opts
+            .api_key
+            .as_ref()
+            .map(|key| RequestSecret::new(Arc::new(OptionsSecret(key.clone()))));
+        self.stream_with_secret(model, ctx, opts, secret.map(|secret| (secret, false)), None)
+            .await
+    }
 
-        // `spawn` (not `spawn_blocking`) for the producer task — the producer
-        // must be async so it can `await` the blocking ffi call. Inside, we
-        // `spawn_blocking` the sync `request_fn` (the ffi call is blocking by
-        // contract). This keeps the runtime worker free while the plugin runs.
-        tokio::spawn(async move {
-            if !provider_options_v1 && !model.provider_options.is_empty() {
-                push_terminal(
-                    &mut prod,
-                    AssistantMessage::terminal(
-                        model.api.clone(),
-                        record.provider_id.clone(),
-                        model.id.clone(),
-                        rpi_ai::types::StopReason::Error,
-                        "extension provider does not declare providerOptions version 1",
-                        0,
-                    ),
-                );
-                return;
-            }
-            if let Some(stream_fn) = record.stream_fn {
-                // Streaming provider: the plugin pushes per-chunk envelopes on
-                // the callback while its request fn is still running; the
-                // producer forwards each one immediately, so the consumer sees
-                // deltas as they arrive instead of one terminal chunk.
-                let message = drive_streaming_plugin_provider(
-                    &snapshot, &record, stream_fn, runtime, lifetime, &model, &ctx, &opts,
-                    &mut prod,
-                )
-                .await;
-                push_terminal(&mut prod, message);
-            } else {
-                let message = drive_plugin_provider(
-                    &snapshot, &record, runtime, lifetime, &model, &ctx, &opts,
-                )
-                .await;
-                push_terminal(&mut prod, message);
-            }
-            // `prod` drops here, closing the mpsc sender so the consumer's
-            // `next()` returns `None` after the terminal event.
-        });
+    async fn stream_simple_with_request_secret(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+    ) -> AssistantMessageEventStream {
+        self.stream_with_secret(model, ctx, opts, Some((secret.clone(), bearer)), None)
+            .await
+    }
 
-        stream
+    async fn stream_simple_with_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        let secret = opts
+            .api_key
+            .as_ref()
+            .map(|key| RequestSecret::new(Arc::new(OptionsSecret(key.clone()))));
+        self.stream_with_secret(
+            model,
+            ctx,
+            opts,
+            secret.map(|secret| (secret, false)),
+            Some(callback),
+        )
+        .await
+    }
+
+    async fn stream_simple_with_request_secret_and_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: &SimpleStreamOptions,
+        secret: &RequestSecret,
+        bearer: bool,
+        callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        self.stream_with_secret(
+            model,
+            ctx,
+            opts,
+            Some((secret.clone(), bearer)),
+            Some(callback),
+        )
+        .await
+    }
+}
+
+/// Builds an explicitly incomplete report for an opaque extension request.
+///
+/// The host knows the selected public model identity but cannot observe plugin
+/// request transformations or determine which configuration values were used.
+///
+/// # Parameters
+/// - `model`: Selected provider model descriptor.
+///
+/// # Returns
+/// An incomplete report with no asserted applied settings.
+fn incomplete_applied_settings_report(model: &Model) -> AppliedRequestSettings {
+    AppliedRequestSettings {
+        schema_version: "rpi-applied-request-settings-v1".to_owned(),
+        provider_id: model.provider.clone(),
+        model_id: model.id.clone(),
+        api_id: model.api.as_str().to_owned(),
+        applied_values: Default::default(),
+        omitted_categories: vec![
+            "extension_managed_request_transforms".to_owned(),
+            "provider_applied_values_unavailable".to_owned(),
+            "provider_options_values".to_owned(),
+            "endpoint".to_owned(),
+            "headers_and_credentials".to_owned(),
+            "prompt_and_transcript".to_owned(),
+            "tools_and_schemas".to_owned(),
+            "unrecognized_request_fields".to_owned(),
+        ],
+        complete: false,
     }
 }
 
@@ -247,7 +409,19 @@ async fn drive_plugin_provider(
         );
     }
 
-    let request_json = request_envelope_json(model, ctx, opts);
+    let request_json = match request_envelope_json(model, ctx, opts) {
+        Ok(request_json) => request_json,
+        Err(error) => {
+            return AssistantMessage::terminal(
+                model.api.clone(),
+                record.provider_id.clone(),
+                model.id.clone(),
+                rpi_ai::types::StopReason::Error,
+                error,
+                0,
+            );
+        }
+    };
 
     // The fn pointers + user_data are `Copy`-able (fn ptrs) or plain raw (ud);
     // clone what spawn_blocking needs. `record` is `Clone` (owned strings).
@@ -292,6 +466,167 @@ async fn drive_plugin_provider(
             0,
         ),
     }
+}
+
+/// Drive a credentialed one-shot provider through its protected ABI callback.
+///
+/// # Parameters
+/// - `snapshot`: Registry snapshot used to reject stale provider instances.
+/// - `record`: Registered extension provider and ownership callbacks.
+/// - `request_fn`: Protected one-shot ABI callback.
+/// - `runtime`: Runtime used to execute the blocking plugin callback.
+/// - `lifetime`: Plugin lifetime guard held until the callback returns.
+/// - `model`: Selected model.
+/// - `ctx`: Prompt context.
+/// - `opts`: Non-secret request options.
+/// - `secret`: Optional protected request credential.
+/// - `bearer`: Whether authorization uses bearer semantics.
+///
+/// # Returns
+/// The plugin response or an error terminal message.
+async fn drive_protected_plugin_provider(
+    snapshot: &Arc<RegistrySnapshot>,
+    record: &RegisteredProvider,
+    request_fn: rpi_plugin_sdk::ProtectedProviderRequestFn,
+    runtime: Handle,
+    lifetime: ProviderRequestLifetime,
+    model: &Model,
+    ctx: &Context,
+    opts: &SimpleStreamOptions,
+    secret: Option<RequestSecret>,
+    bearer: bool,
+) -> AssistantMessage {
+    if !snapshot.is_active() {
+        return AssistantMessage::terminal(
+            model.api.clone(),
+            record.provider_id.clone(),
+            model.id.clone(),
+            rpi_ai::types::StopReason::Error,
+            "extensions provider registry is stale (session swapped/reloaded)",
+            0,
+        );
+    }
+
+    let request_json = match request_envelope_json(model, ctx, opts) {
+        Ok(request_json) => request_json,
+        Err(error) => {
+            return AssistantMessage::terminal(
+                model.api.clone(),
+                record.provider_id.clone(),
+                model.id.clone(),
+                rpi_ai::types::StopReason::Error,
+                error,
+                0,
+            );
+        }
+    };
+    let record = record.clone();
+    let provider_id = record.provider_id.clone();
+    let api = model.api.clone();
+    let model_id = model.id.clone();
+    let request_model_id = model_id.clone();
+    let snapshot = Arc::clone(snapshot);
+    let owner = Arc::new(ProviderControlOwner {
+        state: Arc::new(ProviderControlState::default()),
+        secret: secret.map(|secret| (secret, bearer)),
+        headers: protected_headers(model, opts),
+    });
+    let join = runtime.spawn_blocking(move || {
+        let _lifetime = lifetime;
+        run_protected_provider_request(
+            &snapshot,
+            &record,
+            request_fn,
+            &request_json,
+            &request_model_id,
+            &owner,
+        )
+    });
+
+    match join.await {
+        Ok(ProviderOutcome::Ok(message)) => message,
+        Ok(ProviderOutcome::Err(message)) => AssistantMessage::terminal(
+            api,
+            provider_id,
+            model_id,
+            rpi_ai::types::StopReason::Error,
+            message,
+            0,
+        ),
+        Err(join_error) => AssistantMessage::terminal(
+            api,
+            provider_id,
+            model_id,
+            rpi_ai::types::StopReason::Error,
+            format!("plugin provider task failed: {join_error}"),
+            0,
+        ),
+    }
+}
+
+/// Invoke a protected one-shot provider on the blocking pool and parse its reply.
+///
+/// # Parameters
+/// - `snapshot`: Registry snapshot used for a final staleness check.
+/// - `record`: Registered provider and plugin-owned output deallocator.
+/// - `request_fn`: Protected plugin callback.
+/// - `request_json`: Non-secret serialized request envelope.
+/// - `model_id`: Selected model identity for response defaults.
+/// - `owner`: Credential/control owner held for the callback duration.
+///
+/// # Returns
+/// Parsed response or an error description.
+fn run_protected_provider_request(
+    snapshot: &Arc<RegistrySnapshot>,
+    record: &RegisteredProvider,
+    request_fn: rpi_plugin_sdk::ProtectedProviderRequestFn,
+    request_json: &str,
+    model_id: &str,
+    owner: &ProviderControlOwner,
+) -> ProviderOutcome {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !snapshot.is_active() {
+            return ProviderOutcome::Err("extensions provider registry is stale".into());
+        }
+        let req_ref = StbStringRef::from_str(request_json);
+        let mut out = StbString::empty();
+        let protected_control = protected_control(owner);
+        let rc = request_fn(
+            req_ref,
+            &protected_control,
+            &mut out as *mut StbString,
+            record.user_data,
+        );
+        let out = unsafe { OwnedString::from_raw(out, Some(record.plugin_free_string)) };
+        if rc != 0 {
+            return ProviderOutcome::Err(format!(
+                "plugin provider {} returned error code {rc}",
+                record.provider_id
+            ));
+        }
+        let response_text = out.to_string_lossy();
+        match serde_json::from_str::<AssistantMessage>(&response_text) {
+            Ok(mut message) => {
+                if message.provider.is_empty() {
+                    message.provider = record.provider_id.clone();
+                }
+                if message.model.is_empty() {
+                    message.model = model_id.to_string();
+                }
+                ProviderOutcome::Ok(message)
+            }
+            Err(error) => ProviderOutcome::Err(format!(
+                "plugin provider {} returned unparseable response: {error}",
+                record.provider_id
+            )),
+        }
+    }))
+    .unwrap_or_else(|_| {
+        ProviderOutcome::Err(format!(
+            "plugin provider {} panicked during protected request",
+            record.provider_id
+        ))
+    })
 }
 
 /// The result of one sync `request_fn` call: either a parsed assistant message
@@ -422,16 +757,13 @@ fn push_terminal(prod: &mut AssistantMessageEventStreamProducer, message: Assist
 /// Build the `options` JSON for the request envelope. `SimpleStreamOptions` is
 /// not `Serialize`, so we hand-build the field set (mirrors
 /// `ExtensionProviderHooks::before_request`). Sensitive fields (`api_key`) are
-/// included — the plugin is trusted host-side code (a cdylib the user installed
-/// under `--extensions-dir`); this matches pi's `registerProvider` handing the
-/// full options to the plugin's `streamSimple`.
+/// excluded — provider credentials are exposed only through the protected
+/// streaming control callback, never through serialized JSON.
 fn options_json(opts: &SimpleStreamOptions) -> serde_json::Value {
     serde_json::json!({
-        "apiKey": opts.api_key,
         "timeoutMs": opts.timeout.map(|d| d.as_millis() as u64),
         "maxRetries": opts.max_retries,
         "maxRetryDelayMs": opts.max_retry_delay.map(|d| d.as_millis() as u64),
-        "headers": opts.headers,
         "metadata": opts.metadata,
         "cacheRetention": format!("{:?}", opts.cache_retention),
         "sessionId": opts.session_id,
@@ -440,6 +772,37 @@ fn options_json(opts: &SimpleStreamOptions) -> serde_json::Value {
         "temperature": opts.temperature,
         "thinkingBudgets": opts.thinking_budgets,
     })
+}
+
+/// Return whether request headers require a protected provider ABI.
+///
+/// # Parameters
+/// - `model`: Selected model with optional model-level headers.
+/// - `opts`: Per-request options with optional request headers.
+///
+/// # Returns
+/// `true` when either header map contains entries.
+fn request_has_headers(model: &Model, opts: &SimpleStreamOptions) -> bool {
+    model
+        .headers
+        .as_ref()
+        .is_some_and(|headers| !headers.is_empty())
+        || opts
+            .headers
+            .as_ref()
+            .is_some_and(|headers| !headers.is_empty())
+}
+
+/// Construct a terminal error when the extension ABI cannot consume a secret.
+fn credential_unsupported_message(model: &Model, provider_id: &str) -> AssistantMessage {
+    AssistantMessage::terminal(
+        model.api.clone(),
+        provider_id,
+        model.id.clone(),
+        rpi_ai::types::StopReason::Error,
+        "extension provider ABI does not support protected request inputs",
+        0,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -472,12 +835,13 @@ fn options_json(opts: &SimpleStreamOptions) -> serde_json::Value {
 async fn drive_streaming_plugin_provider(
     snapshot: &Arc<RegistrySnapshot>,
     record: &RegisteredProvider,
-    stream_fn: rpi_plugin_sdk::ProviderStreamRequestFn,
+    stream_fn: StreamProviderCallback,
     runtime: Handle,
     lifetime: ProviderRequestLifetime,
     model: &Model,
     ctx: &Context,
     opts: &SimpleStreamOptions,
+    secret: Option<(RequestSecret, bool)>,
     prod: &mut AssistantMessageEventStreamProducer,
 ) -> AssistantMessage {
     // Staleness: a `/reload`d session must not drive its old providers.
@@ -495,7 +859,19 @@ async fn drive_streaming_plugin_provider(
     // `options.signal` is the same cancellation contract the built-in providers
     // honor: the agent loop cancels this token when the user aborts the run.
     let cancel = opts.signal.clone();
-    let request_json = request_envelope_json(model, ctx, opts);
+    let request_json = match request_envelope_json(model, ctx, opts) {
+        Ok(request_json) => request_json,
+        Err(error) => {
+            return AssistantMessage::terminal(
+                model.api.clone(),
+                record.provider_id.clone(),
+                model.id.clone(),
+                rpi_ai::types::StopReason::Error,
+                error,
+                0,
+            );
+        }
+    };
 
     // The callback bridge. It is moved (not shared) into the blocking task, and
     // it owns the chunk channel's **only** sender: when that task drops it, the
@@ -510,6 +886,8 @@ async fn drive_streaming_plugin_provider(
     };
     let owner = Arc::new(ProviderControlOwner {
         state: Arc::clone(&control),
+        secret,
+        headers: protected_headers(model, opts),
     });
 
     let record_owned = record.clone();
@@ -624,6 +1002,13 @@ async fn drive_streaming_plugin_provider(
 /// message, which becomes the `Done`/`Error` payload.
 type StreamingProviderOutcome = AssistantMessage;
 
+/// Select the legacy or protected streaming ABI for one request.
+#[derive(Clone, Copy)]
+enum StreamProviderCallback {
+    Legacy(rpi_plugin_sdk::ProviderStreamRequestFn),
+    Protected(rpi_plugin_sdk::ProtectedProviderStreamRequestFn),
+}
+
 /// Cancellation latched from `options.signal` for the plugin's synchronous
 /// polling and blocking waits. The condition variable wakes every waiter when
 /// the async driver observes cancellation.
@@ -675,6 +1060,116 @@ impl ProviderControlState {
 /// blocking pool before it calls the plugin.
 struct ProviderControlOwner {
     state: Arc<ProviderControlState>,
+    secret: Option<(RequestSecret, bool)>,
+    headers: Vec<(u32, String, String)>,
+}
+
+/// Copy request header pairs into the protected callback owner.
+///
+/// # Parameters
+/// - `model`: Selected model containing model-level headers.
+/// - `opts`: Per-request options containing request-level headers.
+///
+/// # Returns
+/// Header name/value pairs tagged with their source.
+fn protected_headers(model: &Model, opts: &SimpleStreamOptions) -> Vec<(u32, String, String)> {
+    let model_headers = model.headers.iter().flat_map(|headers| {
+        headers.iter().map(|(name, value)| {
+            (
+                rpi_plugin_sdk::ProviderHeaderSource::Model as u32,
+                name.clone(),
+                value.clone(),
+            )
+        })
+    });
+    let option_headers = opts.headers.iter().flat_map(|headers| {
+        headers.iter().map(|(name, value)| {
+            (
+                rpi_plugin_sdk::ProviderHeaderSource::RequestOptions as u32,
+                name.clone(),
+                value.clone(),
+            )
+        })
+    });
+    model_headers.chain(option_headers).collect()
+}
+
+/// Build a size-versioned protected control value for one plugin call.
+///
+/// # Parameters
+/// - `owner`: Host-owned callback state that outlives the plugin call.
+///
+/// # Returns
+/// Protected controls with only callbacks available for present inputs.
+fn protected_control(owner: &ProviderControlOwner) -> rpi_plugin_sdk::ProtectedProviderControl {
+    rpi_plugin_sdk::ProtectedProviderControl {
+        struct_size: std::mem::size_of::<rpi_plugin_sdk::ProtectedProviderControl>() as u32,
+        stream: rpi_plugin_sdk::ProviderStreamControl {
+            is_cancelled: control_is_cancelled,
+            wait_cancelled_ms: control_wait_cancelled_ms,
+            user_data: owner as *const ProviderControlOwner as *mut c_void,
+        },
+        with_request_secret: owner
+            .secret
+            .as_ref()
+            .map(|_| control_with_request_secret as rpi_plugin_sdk::ProviderSecretFn),
+        request_secret_bearer: owner.secret.as_ref().is_some_and(|(_, bearer)| *bearer),
+        with_request_headers: (!owner.headers.is_empty())
+            .then_some(control_with_request_headers as rpi_plugin_sdk::ProviderHeadersFn),
+        user_data: owner as *const ProviderControlOwner as *mut c_void,
+    }
+}
+
+/// Expose request headers only during synchronous protected consumption.
+extern "C" fn control_with_request_headers(
+    consumer: rpi_plugin_sdk::ProviderHeaderConsumerFn,
+    consumer_user_data: *mut c_void,
+    control_user_data: *mut c_void,
+) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if control_user_data.is_null() {
+            return 1;
+        }
+        // SAFETY: the owner remains alive for the complete plugin request call.
+        let owner = unsafe { &*(control_user_data as *const ProviderControlOwner) };
+        for (source, name, value) in &owner.headers {
+            if consumer(
+                *source,
+                StbStringRef::from_str(name),
+                StbStringRef::from_str(value),
+                consumer_user_data,
+            ) != 0
+            {
+                return 1;
+            }
+        }
+        0
+    }))
+    .unwrap_or(1)
+}
+
+/// Expose the request credential only during a synchronous plugin callback.
+extern "C" fn control_with_request_secret(
+    consumer: rpi_plugin_sdk::ProviderSecretConsumerFn,
+    consumer_user_data: *mut c_void,
+    control_user_data: *mut c_void,
+) -> i32 {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if control_user_data.is_null() {
+            return 1;
+        }
+        // SAFETY: the owner remains alive for the complete plugin request call.
+        let owner = unsafe { &*(control_user_data as *const ProviderControlOwner) };
+        let Some((secret, _)) = &owner.secret else {
+            return 1;
+        };
+        let mut result = 1;
+        secret.with_secret(&mut |value| {
+            result = consumer(StbStringRef::from_str(value), consumer_user_data);
+        });
+        result
+    }));
+    outcome.unwrap_or(1)
 }
 
 /// The host's two plugin-facing control trampolines.
@@ -817,7 +1312,7 @@ extern "C" fn stream_emit_trampoline(event_json: StbString, user_data: *mut c_vo
 fn run_streaming_provider_request(
     snapshot: &Arc<RegistrySnapshot>,
     record: &RegisteredProvider,
-    stream_fn: rpi_plugin_sdk::ProviderStreamRequestFn,
+    stream_fn: StreamProviderCallback,
     bridge: &StreamEmitBridge,
     owner: &ProviderControlOwner,
     request_json: &str,
@@ -837,18 +1332,29 @@ fn run_streaming_provider_request(
             wait_cancelled_ms: control_wait_cancelled_ms,
             user_data: owner as *const ProviderControlOwner as *mut std::ffi::c_void,
         };
-        let rc = stream_fn(
-            req_ref,
-            Some(stream_emit_trampoline),
-            relay,
-            &control as *const rpi_plugin_sdk::ProviderStreamControl,
-            // No deferred-completion channel on this host: a plugin must finish
-            // inside this call (see `ProviderStreamCompletionFn`).
-            None,
-            std::ptr::null_mut(),
-            &mut out as *mut StbString,
-            record.user_data,
-        );
+        let protected = protected_control(owner);
+        let rc = match stream_fn {
+            StreamProviderCallback::Legacy(stream_fn) => stream_fn(
+                req_ref,
+                Some(stream_emit_trampoline),
+                relay,
+                &control,
+                None,
+                std::ptr::null_mut(),
+                &mut out,
+                record.user_data,
+            ),
+            StreamProviderCallback::Protected(stream_fn) => stream_fn(
+                req_ref,
+                Some(stream_emit_trampoline),
+                relay,
+                &protected,
+                None,
+                std::ptr::null_mut(),
+                &mut out,
+                record.user_data,
+            ),
+        };
         // SAFETY: the callback transfers its live output to its registered
         // producer, on every rc path (including an empty slot).
         let out = unsafe {
@@ -955,11 +1461,17 @@ fn api_from_style(style: &str) -> rpi_ai::types::Api {
 /// `providerOptions` is a separately versioned, provider-specific configuration
 /// object. It is omitted when empty and never enters serialized public model
 /// metadata.
-fn request_envelope_json(model: &Model, ctx: &Context, opts: &SimpleStreamOptions) -> String {
+fn request_envelope_json(
+    model: &Model,
+    ctx: &Context,
+    opts: &SimpleStreamOptions,
+) -> Result<String, String> {
+    let mut model = model.clone();
+    model.headers = None;
     let mut request = serde_json::Map::from_iter([
         (
             "model".to_owned(),
-            serde_json::to_value(model).unwrap_or(serde_json::Value::Null),
+            serde_json::to_value(&model).unwrap_or(serde_json::Value::Null),
         ),
         (
             "context".to_owned(),
@@ -972,11 +1484,11 @@ fn request_envelope_json(model: &Model, ctx: &Context, opts: &SimpleStreamOption
             "providerOptions".to_owned(),
             serde_json::json!({
                 "version": 1,
-                "values": model.provider_options,
+                "values": &model.provider_options,
             }),
         );
     }
-    serde_json::Value::Object(request).to_string()
+    Ok(serde_json::Value::Object(request).to_string())
 }
 
 /// Live accumulator for the chunks a streaming provider emits.
@@ -1393,11 +1905,14 @@ mod tests {
             "provider",
             "https://example.test",
         );
-        let empty_request: serde_json::Value = serde_json::from_str(&request_envelope_json(
-            &model,
-            &Context::new(vec![]),
-            &SimpleStreamOptions::default(),
-        ))
+        let empty_request: serde_json::Value = serde_json::from_str(
+            &request_envelope_json(
+                &model,
+                &Context::new(vec![]),
+                &SimpleStreamOptions::default(),
+            )
+            .expect("safe empty provider request envelope"),
+        )
         .expect("empty provider request envelope");
         assert!(empty_request.get("providerOptions").is_none());
 
@@ -1410,11 +1925,14 @@ mod tests {
         );
 
         let public_model = serde_json::to_value(&model).expect("public model JSON");
-        let request: serde_json::Value = serde_json::from_str(&request_envelope_json(
-            &model,
-            &Context::new(vec![]),
-            &SimpleStreamOptions::default(),
-        ))
+        let request: serde_json::Value = serde_json::from_str(
+            &request_envelope_json(
+                &model,
+                &Context::new(vec![]),
+                &SimpleStreamOptions::default(),
+            )
+            .expect("safe provider options request envelope"),
+        )
         .expect("provider request envelope");
 
         assert!(public_model.get("providerOptions").is_none());
@@ -1483,6 +2001,8 @@ mod tests {
             base_url: "https://example.test".to_owned(),
             api_style: "faux".to_owned(),
             request_fn: capture_provider_options_request,
+            protected_request_fn: None,
+            protected_stream_fn: None,
             stream_fn: None,
             plugin_free_string: stub_free,
             user_data: std::ptr::null_mut(),
@@ -1510,6 +2030,8 @@ mod tests {
                 base_url: "https://example.test".to_owned(),
                 api_style: "faux".to_owned(),
                 request_fn: capture_provider_options_request,
+                protected_request_fn: None,
+                protected_stream_fn: None,
                 stream_fn: None,
                 plugin_free_string: stub_free,
                 user_data: Arc::as_ptr(&legacy_probe) as *mut c_void,
@@ -1561,6 +2083,8 @@ mod tests {
                 base_url: "https://example.test".to_owned(),
                 api_style: "faux".to_owned(),
                 request_fn: capture_provider_options_request,
+                protected_request_fn: None,
+                protected_stream_fn: None,
                 stream_fn: None,
                 plugin_free_string: stub_free,
                 user_data: Arc::as_ptr(&opted_probe) as *mut c_void,
@@ -1664,6 +2188,8 @@ mod tests {
             base_url: "https://example".to_string(),
             api_style: "anthropic-messages".to_string(),
             request_fn: ok_request_fn,
+            protected_request_fn: None,
+            protected_stream_fn: None,
             stream_fn: None,
             plugin_free_string: stub_free,
             user_data: std::ptr::null_mut(),
@@ -1696,6 +2222,8 @@ mod tests {
             base_url: "https://example".to_string(),
             api_style: "anthropic-messages".to_string(),
             request_fn: err_request_fn,
+            protected_request_fn: None,
+            protected_stream_fn: None,
             stream_fn: None,
             plugin_free_string: stub_free,
             user_data: std::ptr::null_mut(),
@@ -1758,6 +2286,8 @@ mod tests {
             base_url: "https://example".to_string(),
             api_style: "faux".to_string(),
             request_fn: ok_request_fn,
+            protected_request_fn: None,
+            protected_stream_fn: None,
             stream_fn: None,
             plugin_free_string: stub_free,
             user_data: std::ptr::null_mut(),
@@ -1786,6 +2316,8 @@ mod tests {
             base_url: "https://example".to_string(),
             api_style: "faux".to_string(),
             request_fn: ok_request_fn,
+            protected_request_fn: None,
+            protected_stream_fn: None,
             stream_fn: Some(cancel_provider::request_v2),
             plugin_free_string: stub_free,
             user_data: std::ptr::null_mut(),
@@ -1816,12 +2348,13 @@ mod tests {
             let message = drive_streaming_plugin_provider(
                 &snapshot,
                 &record,
-                stream_fn,
+                StreamProviderCallback::Legacy(stream_fn),
                 Handle::current(),
                 ProviderRequestLifetime::new(PluginKeepalive::empty()),
                 &model,
                 &ctx,
                 &opts,
+                None,
                 &mut prod,
             )
             .await;
@@ -1876,6 +2409,8 @@ mod tests {
     async fn a_cancelled_request_stops_forwarding_content_even_if_the_plugin_pushes() {
         let owner = Arc::new(ProviderControlOwner {
             state: Arc::new(ProviderControlState::default()),
+            secret: None,
+            headers: Vec::new(),
         });
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
         let bridge = StreamEmitBridge {
@@ -1922,6 +2457,8 @@ mod tests {
     fn the_control_surface_reports_cancellation_for_content_only() {
         let owner = Arc::new(ProviderControlOwner {
             state: Arc::new(ProviderControlState::default()),
+            secret: None,
+            headers: Vec::new(),
         });
         let user_data = Arc::as_ptr(&owner) as *mut c_void;
         let content = rpi_plugin_sdk::ProviderChunkKind::Content as u32;

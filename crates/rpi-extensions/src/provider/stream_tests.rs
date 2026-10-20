@@ -70,6 +70,8 @@ async fn cancellation_finishes_before_an_uncooperative_plugin_and_retains_its_li
         base_url: "https://example".into(),
         api_style: "faux".into(),
         request_fn: unused_request,
+        protected_request_fn: None,
+        protected_stream_fn: None,
         stream_fn: Some(paused_success),
         plugin_free_string: rpi_plugin_sdk::callbacks::free_string,
         user_data: Arc::into_raw(Arc::clone(&state)) as *mut c_void,
