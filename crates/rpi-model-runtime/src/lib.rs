@@ -16,9 +16,12 @@ pub use credentials::{
     CredentialRequestSource, CredentialSource, HostCredentialMaterial, ProtectedCredential,
     ProtectedCredentialResolver, ResolvedCredential,
 };
-pub use fingerprint::{model_configuration_fingerprint, ModelConfigurationFingerprint};
-pub use selection::{resolve_selection, ModelSelection, ResolvedSelection, SelectionError};
+pub use fingerprint::{
+    model_configuration_fingerprint, model_execution_fingerprint, ModelConfigurationFingerprint,
+    ModelExecutionExclusion, ModelExecutionFingerprint,
+};
 pub use models::{
     builtin_api_key_env, has_header_auth, provider_to_models, resolve_credential,
     ConfigValueResolver, ModelDefinition, ModelsConfig, ProviderConfig,
 };
+pub use selection::{resolve_selection, ModelSelection, ResolvedSelection, SelectionError};
