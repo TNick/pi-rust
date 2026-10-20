@@ -5,6 +5,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use crate::terminal::InputEvent;
+
 /// Component interface - all components must implement this.
 ///
 /// Components are the building blocks of the TUI. Each component can render
@@ -27,6 +29,22 @@ pub trait Component: Send + Sync {
     /// # Returns
     /// true if the input was consumed, false otherwise
     fn handle_input(&self, _data: &str) -> bool {
+        false
+    }
+
+    /// Handle a normalized terminal event while this component has focus.
+    ///
+    /// Hosts should dispatch events through
+    /// [`crate::tui_alt_screen::TuiAltScreen::dispatch_input`] instead of
+    /// calling this method directly. Components that accept terminal input can
+    /// override it and handle the event variants they support.
+    ///
+    /// # Parameters
+    /// - `event`: Normalized keyboard, paste, mouse, or focus event.
+    ///
+    /// # Returns
+    /// `true` when the component consumed the event.
+    fn handle_event(&self, _event: &InputEvent) -> bool {
         false
     }
 

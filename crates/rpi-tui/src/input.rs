@@ -694,6 +694,20 @@ impl Component for Input {
         // No cached state to invalidate
     }
 
+    fn handle_event(&self, event: &crate::terminal::InputEvent) -> bool {
+        match event {
+            crate::terminal::InputEvent::Key(key) => {
+                self.handle_key(*key);
+                true
+            }
+            crate::terminal::InputEvent::Paste(text) => {
+                self.handle_paste(text);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

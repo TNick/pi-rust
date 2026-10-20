@@ -87,6 +87,7 @@ pub struct TerminalInfo {
 #[derive(Debug, Clone)]
 pub enum InputEvent {
     Key(KeyEvent),
+    Paste(String),
     Mouse(MouseEvent),
     Resize(usize, usize),
     FocusGained,
@@ -404,16 +405,17 @@ impl Terminal for ProcessTerminal {
                                     normalize_key_event_with_protocol(key, supports_kitty_keyboard),
                                 )),
                                 Event::Mouse(mouse) => on_input(InputEvent::Mouse(mouse)),
+                                Event::Paste(text) => on_input(InputEvent::Paste(text)),
                                 Event::Resize(cols, rows) => {
                                     if let Ok(mut info) = info_clone.lock() {
                                         info.columns = cols as usize;
                                         info.rows = rows as usize;
                                     }
+                                    on_input(InputEvent::Resize(cols as usize, rows as usize));
                                     on_resize();
                                 }
                                 Event::FocusGained => on_input(InputEvent::FocusGained),
                                 Event::FocusLost => on_input(InputEvent::FocusLost),
-                                Event::Paste(_) => { /* Ignore paste events for now */ }
                             }
                         }
                     }

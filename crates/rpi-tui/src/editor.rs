@@ -1573,6 +1573,17 @@ impl Component for Editor {
         false
     }
 
+    fn handle_event(&self, event: &crate::terminal::InputEvent) -> bool {
+        match event {
+            crate::terminal::InputEvent::Key(key) => self.handle_key(*key),
+            crate::terminal::InputEvent::Paste(text) => {
+                self.insert(text);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

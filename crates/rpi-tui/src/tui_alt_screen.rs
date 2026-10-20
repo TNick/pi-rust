@@ -558,6 +558,33 @@ impl TuiAltScreen {
         self.request_render(false);
     }
 
+    /// Dispatch a terminal event to the focused component or TUI resize path.
+    ///
+    /// Resize events always schedule a repaint. Other events are delivered to
+    /// the currently focused component; consumed events schedule a repaint.
+    /// Events with no focused component are safely ignored.
+    ///
+    /// # Parameters
+    /// - `event`: Normalized event emitted by the terminal input loop.
+    ///
+    /// # Returns
+    /// `true` when the resize path or focused component consumed the event.
+    pub fn dispatch_input(&self, event: InputEvent) -> bool {
+        if matches!(&event, InputEvent::Resize(_, _)) {
+            self.note_resize();
+            return true;
+        }
+
+        let Some(focused) = self.get_focus() else {
+            return false;
+        };
+        let consumed = focused.handle_event(&event);
+        if consumed {
+            self.request_render(false);
+        }
+        consumed
+    }
+
     /// Watchdog: re-read the terminal size and repaint when it differs from the
     /// geometry currently on screen.
     ///
