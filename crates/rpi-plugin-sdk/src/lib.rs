@@ -1346,6 +1346,22 @@ pub type ProviderHeadersFn = extern "C" fn(
     control_user_data: *mut c_void,
 ) -> i32;
 
+/// Accepts a borrowed JSON applied-settings report for the active request.
+///
+/// The report must use `rpi-applied-request-settings-v1`. The host checks
+/// request identity and retains only allowlisted settings. The host cannot
+/// independently verify an extension's final HTTP body, so accepted reports
+/// remain incomplete. The borrowed bytes are valid only for the call.
+///
+/// # Parameters
+/// - `report_json`: Borrowed serialized `AppliedRequestSettings` value.
+/// - `control_user_data`: Handle passed in [`ProtectedProviderControl`].
+///
+/// # Returns
+/// Zero when the report is accepted; nonzero when rejected.
+pub type ProviderAppliedSettingsFn =
+    extern "C" fn(report_json: StbStringRef, control_user_data: *mut c_void) -> i32;
+
 /// Versioned protected input available only to protected provider callbacks.
 ///
 /// The host passes this struct only through appended protected registration
@@ -1365,6 +1381,10 @@ pub struct ProtectedProviderControl {
     pub with_request_headers: Option<ProviderHeadersFn>,
     /// Opaque host handle passed back to credential/header callbacks.
     pub user_data: *mut c_void,
+    /// Submit a versioned report after final request preparation.
+    ///
+    /// This field was appended; callers must check `struct_size` before reading.
+    pub report_applied_settings: Option<ProviderAppliedSettingsFn>,
 }
 
 /// Completion signal a **v2** streaming provider calls **after** its request fn

@@ -189,6 +189,8 @@ impl PluggableProvider {
         let mut opts = opts.clone();
         opts.api_key = None;
         let provider_options_v1 = self.provider_options_v1;
+        let applied_report = Arc::new(Mutex::new(None));
+        let request_applied_report = Arc::clone(&applied_report);
 
         tokio::spawn(async move {
             let message = if !provider_options_v1 && !model.provider_options.is_empty() {
@@ -211,6 +213,7 @@ impl PluggableProvider {
                     &ctx,
                     &opts,
                     secret,
+                    Arc::clone(&request_applied_report),
                     &mut prod,
                 )
                 .await
@@ -228,6 +231,7 @@ impl PluggableProvider {
                     &ctx,
                     &opts,
                     secret,
+                    Arc::clone(&request_applied_report),
                     &mut prod,
                 )
                 .await
@@ -245,13 +249,23 @@ impl PluggableProvider {
                             &opts,
                             Some(secret),
                             bearer,
+                            Arc::clone(&request_applied_report),
                         )
                         .await
                     }
                     (None, Some(request_fn)) => {
                         drive_protected_plugin_provider(
-                            &snapshot, &record, request_fn, runtime, lifetime, &model, &ctx, &opts,
-                            None, false,
+                            &snapshot,
+                            &record,
+                            request_fn,
+                            runtime,
+                            lifetime,
+                            &model,
+                            &ctx,
+                            &opts,
+                            None,
+                            false,
+                            Arc::clone(&request_applied_report),
                         )
                         .await
                     }
@@ -268,7 +282,12 @@ impl PluggableProvider {
                 }
             };
             if let Some(callback) = applied_settings_callback {
-                callback(incomplete_applied_settings_report(&model));
+                let report = request_applied_report
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                    .unwrap_or_else(|| incomplete_applied_settings_report(&model));
+                callback(report);
             }
             push_terminal(&mut prod, message);
         });
@@ -495,6 +514,7 @@ async fn drive_protected_plugin_provider(
     opts: &SimpleStreamOptions,
     secret: Option<RequestSecret>,
     bearer: bool,
+    applied_report: Arc<Mutex<Option<AppliedRequestSettings>>>,
 ) -> AssistantMessage {
     if !snapshot.is_active() {
         return AssistantMessage::terminal(
@@ -530,6 +550,8 @@ async fn drive_protected_plugin_provider(
         state: Arc::new(ProviderControlState::default()),
         secret: secret.map(|secret| (secret, bearer)),
         headers: protected_headers(model, opts),
+        applied_report,
+        expected_model: model.clone(),
     });
     let join = runtime.spawn_blocking(move || {
         let _lifetime = lifetime;
@@ -842,6 +864,7 @@ async fn drive_streaming_plugin_provider(
     ctx: &Context,
     opts: &SimpleStreamOptions,
     secret: Option<(RequestSecret, bool)>,
+    applied_report: Arc<Mutex<Option<AppliedRequestSettings>>>,
     prod: &mut AssistantMessageEventStreamProducer,
 ) -> AssistantMessage {
     // Staleness: a `/reload`d session must not drive its old providers.
@@ -888,6 +911,8 @@ async fn drive_streaming_plugin_provider(
         state: Arc::clone(&control),
         secret,
         headers: protected_headers(model, opts),
+        applied_report,
+        expected_model: model.clone(),
     });
 
     let record_owned = record.clone();
@@ -1054,14 +1079,198 @@ impl ProviderControlState {
     }
 }
 
-/// The owner of the control state, kept alive for the whole request. Handing the
-/// plugin a pointer to an `Arc`-backed allocation (rather than a stack address)
-/// means the address stays valid even if the request task is moved by the
-/// blocking pool before it calls the plugin.
+/// Owns host callbacks and attestation state for one plugin request.
+///
+/// The allocation remains alive for the full request call, including when the
+/// blocking task moves between worker threads.
+///
+/// # Public members
+/// None.
+///
+/// # Private members
+/// - `state`: Streaming cancellation state.
+/// - `secret`: Optional protected credential and authorization mode.
+/// - `headers`: Protected model and request headers.
+/// - `applied_report`: First accepted applied-settings report.
+/// - `expected_model`: Request identity used to validate reports.
 struct ProviderControlOwner {
+    /// Streaming cancellation state.
     state: Arc<ProviderControlState>,
+    /// Optional protected credential and authorization mode.
     secret: Option<(RequestSecret, bool)>,
+    /// Protected model and request headers.
     headers: Vec<(u32, String, String)>,
+    /// First accepted applied-settings report.
+    applied_report: Arc<Mutex<Option<AppliedRequestSettings>>>,
+    /// Request identity used to validate reports.
+    expected_model: Model,
+}
+
+/// Accept and normalize a plugin's report for the active model request.
+///
+/// # Parameters
+/// - `report_json`: Borrowed serialized plugin report.
+/// - `control_user_data`: Live request control owner pointer.
+///
+/// # Returns
+/// Zero when one safe report is accepted; nonzero otherwise.
+extern "C" fn control_report_applied_settings(
+    report_json: StbStringRef,
+    control_user_data: *mut c_void,
+) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if control_user_data.is_null() {
+            return 1;
+        }
+        // SAFETY: the owner remains alive for the complete plugin request call.
+        let owner = unsafe { &*(control_user_data as *const ProviderControlOwner) };
+        let report_text = unsafe { report_json.as_str() };
+        if report_text.len() > 16 * 1024 {
+            return 1;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(report_text) else {
+            return 1;
+        };
+        let Some(report) = normalize_extension_report(&value, &owner.expected_model) else {
+            return 1;
+        };
+        let mut slot = owner
+            .applied_report
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if slot.is_some() {
+            return 1;
+        }
+        *slot = Some(report);
+        0
+    }))
+    .unwrap_or(1)
+}
+
+/// Retain only the applied-settings v1 allowlist from an extension report.
+///
+/// # Parameters
+/// - `value`: Parsed report object.
+///
+/// # Returns
+/// A sanitized incomplete report, or `None` when identity/schema is invalid.
+fn normalize_extension_report(
+    value: &serde_json::Value,
+    model: &Model,
+) -> Option<AppliedRequestSettings> {
+    let object = value.as_object()?;
+    const FIELDS: &[&str] = &[
+        "schemaVersion",
+        "providerId",
+        "modelId",
+        "apiId",
+        "appliedValues",
+        "omittedCategories",
+        "complete",
+    ];
+    if object.keys().any(|key| !FIELDS.contains(&key.as_str()))
+        || object.get("schemaVersion")?.as_str()? != "rpi-applied-request-settings-v1"
+    {
+        return None;
+    }
+    let mut report: AppliedRequestSettings = serde_json::from_value(value.clone()).ok()?;
+    if report.provider_id != model.provider
+        || report.model_id != model.id
+        || report.api_id != model.api.as_str()
+    {
+        return None;
+    }
+    let mut safe_values = std::collections::BTreeMap::new();
+    for (key, setting) in report.applied_values {
+        let valid = match key.as_str() {
+            "model" => setting.as_str() == Some(model.id.as_str()),
+            "temperature" | "top_p" | "frequency_penalty" | "presence_penalty" => {
+                setting.as_f64().is_some()
+            }
+            "seed" => setting.as_i64().is_some() || setting.as_u64().is_some(),
+            "max_tokens" | "max_completion_tokens" | "max_output_tokens" => {
+                setting.as_u64().is_some()
+            }
+            "stream" | "store" => setting.is_boolean(),
+            "reasoning" => {
+                let Some(fields) = setting.as_object() else {
+                    continue;
+                };
+                if fields.len() != 1 || !fields.contains_key("effort") {
+                    continue;
+                }
+                let Some(effort) = setting.get("effort").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                if allowed_reasoning_effort(effort) {
+                    safe_values.insert(
+                        "reasoning".to_owned(),
+                        serde_json::json!({"effort": effort}),
+                    );
+                }
+                continue;
+            }
+            "thinking" => {
+                let Some(fields) = setting.as_object() else {
+                    continue;
+                };
+                fields.keys().all(|field| {
+                    (field == "type"
+                        && fields
+                            .get(field)
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(allowed_thinking_type))
+                        || (field == "budget_tokens"
+                            && fields
+                                .get(field)
+                                .and_then(serde_json::Value::as_u64)
+                                .is_some())
+                }) && !fields.is_empty()
+            }
+            _ => false,
+        };
+        if valid {
+            safe_values.insert(key, setting);
+        }
+    }
+    report.applied_values = safe_values;
+    report.omitted_categories = vec![
+        "extension_managed_request_transforms".to_owned(),
+        "provider_applied_values_unavailable".to_owned(),
+        "provider_options_values".to_owned(),
+        "endpoint".to_owned(),
+        "headers_and_credentials".to_owned(),
+        "prompt_and_transcript".to_owned(),
+        "tools_and_schemas".to_owned(),
+        "unrecognized_request_fields".to_owned(),
+    ];
+    report.complete = false;
+    Some(report)
+}
+
+/// Restrict reported reasoning effort to known public values.
+///
+/// # Parameters
+/// - `text`: Candidate effort string.
+///
+/// # Returns
+/// Whether the value is an allowed effort label.
+fn allowed_reasoning_effort(text: &str) -> bool {
+    matches!(
+        text,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    )
+}
+
+/// Restrict reported thinking mode to known public values.
+///
+/// # Parameters
+/// - `text`: Candidate thinking mode.
+///
+/// # Returns
+/// Whether the value is an allowed thinking mode.
+fn allowed_thinking_type(text: &str) -> bool {
+    matches!(text, "enabled" | "disabled" | "adaptive")
 }
 
 /// Copy request header pairs into the protected callback owner.
@@ -1117,6 +1326,9 @@ fn protected_control(owner: &ProviderControlOwner) -> rpi_plugin_sdk::ProtectedP
         with_request_headers: (!owner.headers.is_empty())
             .then_some(control_with_request_headers as rpi_plugin_sdk::ProviderHeadersFn),
         user_data: owner as *const ProviderControlOwner as *mut c_void,
+        report_applied_settings: Some(
+            control_report_applied_settings as rpi_plugin_sdk::ProviderAppliedSettingsFn,
+        ),
     }
 }
 
@@ -2355,6 +2567,7 @@ mod tests {
                 &ctx,
                 &opts,
                 None,
+                Arc::new(Mutex::new(None)),
                 &mut prod,
             )
             .await;
@@ -2411,6 +2624,14 @@ mod tests {
             state: Arc::new(ProviderControlState::default()),
             secret: None,
             headers: Vec::new(),
+            applied_report: Arc::new(Mutex::new(None)),
+            expected_model: Model::new(
+                "test-model",
+                "Test Model",
+                rpi_ai::types::Api::Faux,
+                "test-provider",
+                "https://example.test",
+            ),
         });
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
         let bridge = StreamEmitBridge {
@@ -2459,6 +2680,14 @@ mod tests {
             state: Arc::new(ProviderControlState::default()),
             secret: None,
             headers: Vec::new(),
+            applied_report: Arc::new(Mutex::new(None)),
+            expected_model: Model::new(
+                "test-model",
+                "Test Model",
+                rpi_ai::types::Api::Faux,
+                "test-provider",
+                "https://example.test",
+            ),
         });
         let user_data = Arc::as_ptr(&owner) as *mut c_void;
         let content = rpi_plugin_sdk::ProviderChunkKind::Content as u32;

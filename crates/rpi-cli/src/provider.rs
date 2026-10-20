@@ -68,9 +68,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rpi_ai::providers::anthropic::AnthropicProvider;
-use rpi_ai::providers::openai_completions::OpenAiCompletionsProvider;
-use rpi_ai::providers::openai_responses::OpenAiResponsesProvider;
 use rpi_ai::{
     AssistantMessageEventStream, Context, Model, Provider, SimpleStreamOptions, ThinkingLevel,
 };

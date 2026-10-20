@@ -18,3 +18,5 @@ indexmap = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+reqwest = { workspace = true }
+async-trait = { workspace = true }

@@ -7,8 +7,8 @@ The terminal UI primitives behind the `rpi` interactive agent: a component
 model, layout containers, an editor, transcript rendering, and both fullscreen
 and main-screen terminal modes.
 
-This is the rendering layer, not an extension point. Agents extend `rpi` by
-registering tools and event handlers (see
+This is the rendering and component layer. Agents extend `rpi` by registering
+tools and event handlers (see
 [`rpi-plugin-sdk`](https://crates.io/crates/rpi-plugin-sdk)), and the CLI decides
 how to draw them.
 
@@ -64,6 +64,14 @@ The renderer diffs that against the previous frame and emits only the changed
 line range. Unchanged frames produce no output at all, which is what keeps a
 background status tick from yanking the viewport back to the bottom of a main-screen
 session.
+
+## Host-owned interactions
+
+Host components can implement `Component::handle_event` to receive normalized
+terminal events while focused. Set the component as the layout root and focus,
+then call `TuiAltScreen::run_until` with a host stop predicate. That runner owns
+terminal startup, input dispatch, rendering, and shutdown as one lifecycle; the
+host does not need a second terminal reader or a `start_readerless` event loop.
 
 ## Running the example
 

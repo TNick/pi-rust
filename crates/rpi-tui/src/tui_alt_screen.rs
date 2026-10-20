@@ -1373,6 +1373,36 @@ impl Drop for TuiAltScreen {
 }
 
 impl TuiAltScreen {
+    /// Run this TUI until the host component requests shutdown.
+    ///
+    /// This method owns one complete terminal lifecycle: it starts the native
+    /// input reader and render scheduler, dispatches input to the focused
+    /// component, then stops the TUI and restores the terminal before returning.
+    /// The predicate is polled on the calling thread, so a focused component
+    /// can set shared state from [`Component::handle_event`] to end the run.
+    ///
+    /// # Parameters
+    /// - `should_stop`: Host predicate that returns `true` after the component
+    ///   has completed its interaction.
+    ///
+    /// # Panics
+    /// Resumes a panic from `should_stop` after stopping the TUI and restoring
+    /// the terminal.
+    pub fn run_until(self: &Arc<Self>, mut should_stop: impl FnMut() -> bool) {
+        self.start_render_scheduler();
+        self.start();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            while !should_stop() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }));
+        self.stop(TuiStopOptions::default());
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     /// Set up the tty and render the first frame **without** spawning the
     /// `ProcessTerminal` input-reader thread. The caller owns the input loop
     /// (e.g. a `spawn_blocking` `event::read()` loop) and handles resize/key

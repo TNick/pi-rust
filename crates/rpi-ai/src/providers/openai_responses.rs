@@ -218,7 +218,8 @@ impl OpenAiResponsesProvider {
         let http = self.http.clone();
         let model = model.clone();
         let ctx = Arc::new(ctx.clone());
-        let opts = opts.clone();
+        let mut opts = opts.clone();
+        opts.api_key = None;
         let secret = secret.clone();
         tokio::spawn(async move {
             run_stream(

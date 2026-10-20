@@ -5,12 +5,23 @@ use super::*;
 use rpi_extensions::{ExtensionSession, ProviderManifest};
 
 trait ProviderFactory: Send + Sync {
+    /// Creates an implementation while keeping private host model values scoped.
+    ///
+    /// # Parameters
+    /// - `provider_id`: Public identity assigned by the host.
+    /// - `models`: Header-free descriptors exposed to ordinary factories.
+    /// - `private_models`: Canonical models supplied only to protocol factories.
+    /// - `settings`: Host HTTP and runtime settings.
+    ///
+    /// # Returns
+    /// The provider implementation, or `None` when it cannot be constructed.
     fn create(
         &self,
         provider_id: &str,
         models: Vec<Model>,
+        private_models: Option<&[Model]>,
         settings: &settings::Settings,
-    ) -> Arc<dyn Provider>;
+    ) -> Option<Arc<dyn Provider>>;
 }
 
 struct ProtocolFactory(rpi_ai::Api);
@@ -19,43 +30,36 @@ impl ProviderFactory for ProtocolFactory {
         &self,
         provider_id: &str,
         models: Vec<Model>,
+        private_models: Option<&[Model]>,
         settings: &settings::Settings,
-    ) -> Arc<dyn Provider> {
+    ) -> Option<Arc<dyn Provider>> {
         let fallback = if self.0 == rpi_ai::Api::AnthropicMessages {
             "https://api.anthropic.com"
         } else {
             "https://api.openai.com/v1"
         };
-        let http = provider_http_client(&models, fallback, settings);
-        match self.0 {
-            rpi_ai::Api::AnthropicMessages => Arc::new(
-                AnthropicProvider::with_models_without_env_api_key(None, http, models),
-            ),
-            rpi_ai::Api::OpenaiCompletions => {
-                Arc::new(OpenAiCompletionsProvider::with_models_without_env_api_key(
-                    provider_id,
-                    None,
-                    http,
-                    models,
-                ))
-            }
-            rpi_ai::Api::OpenaiResponses => {
-                Arc::new(OpenAiResponsesProvider::with_models_without_env_api_key(
-                    provider_id,
-                    None,
-                    http,
-                    models,
-                ))
-            }
-            _ => unreachable!("only supported wire protocols are registered"),
-        }
+        let binding_models = private_models.unwrap_or(&models);
+        let http = provider_http_client(binding_models, fallback, settings);
+        rpi_model_runtime::create_builtin_provider_for_api(
+            provider_id,
+            self.0.clone(),
+            binding_models.to_vec(),
+            http,
+        )
+        .ok()
     }
 }
 
 struct ExtensionFactory(Arc<dyn Provider>);
 impl ProviderFactory for ExtensionFactory {
-    fn create(&self, _: &str, _: Vec<Model>, _: &settings::Settings) -> Arc<dyn Provider> {
-        self.0.clone()
+    fn create(
+        &self,
+        _: &str,
+        _: Vec<Model>,
+        _: Option<&[Model]>,
+        _: &settings::Settings,
+    ) -> Option<Arc<dyn Provider>> {
+        Some(self.0.clone())
     }
 }
 
@@ -124,6 +128,12 @@ impl RuntimeFactories {
         auth: RequestAuth,
         settings: &settings::Settings,
     ) -> Option<(Arc<dyn Provider>, Arc<ExecutionBinding>)> {
+        if models
+            .iter()
+            .any(|model| model.provider != provider_id || model.api != *api)
+        {
+            return None;
+        }
         let extension_factory = self.providers.get(provider_id).filter(|_| {
             self.provider_apis
                 .get(provider_id)
@@ -139,8 +149,17 @@ impl RuntimeFactories {
         } else {
             (self.protocols.get(api.as_str())?, None)
         };
+        let private_models = models.clone();
         let binding = Arc::new(ExecutionBinding::new(provider_id, models, auth));
-        let inner = factory.create(provider_id, binding.models().to_vec(), settings);
+        let factory_private_models = extension_factory
+            .is_none()
+            .then_some(private_models.as_slice());
+        let inner = factory.create(
+            provider_id,
+            binding.models().to_vec(),
+            factory_private_models,
+            settings,
+        )?;
         let provider = Arc::new(ConfiguredProvider {
             id: provider_id.into(),
             inner,
@@ -212,17 +231,85 @@ impl Provider for RoutedProvider {
         context: &Context,
         options: &SimpleStreamOptions,
     ) -> AssistantMessageEventStream {
-        let route = self.routes.iter().find(|route| {
+        match self.route_for(model) {
+            Some(route) => route.stream_simple(model, context, options).await,
+            None => unbound_model_error(model, &self.id),
+        }
+    }
+
+    async fn stream_simple_with_applied_settings(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: &SimpleStreamOptions,
+        callback: rpi_ai::AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        match self.route_for(model) {
+            Some(route) => {
+                route
+                    .stream_simple_with_applied_settings(model, context, options, callback)
+                    .await
+            }
+            None => unbound_model_error(model, &self.id),
+        }
+    }
+
+    async fn stream_simple_with_request_secret(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: &SimpleStreamOptions,
+        secret: &rpi_ai::RequestSecret,
+        bearer: bool,
+    ) -> AssistantMessageEventStream {
+        match self.route_for(model) {
+            Some(route) => {
+                route
+                    .stream_simple_with_request_secret(model, context, options, secret, bearer)
+                    .await
+            }
+            None => unbound_model_error(model, &self.id),
+        }
+    }
+
+    async fn stream_simple_with_request_secret_and_applied_settings(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: &SimpleStreamOptions,
+        secret: &rpi_ai::RequestSecret,
+        bearer: bool,
+        callback: rpi_ai::AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        match self.route_for(model) {
+            Some(route) => {
+                route
+                    .stream_simple_with_request_secret_and_applied_settings(
+                        model, context, options, secret, bearer, callback,
+                    )
+                    .await
+            }
+            None => unbound_model_error(model, &self.id),
+        }
+    }
+}
+
+impl RoutedProvider {
+    /// Find the route that owns a selected provider/API/model tuple.
+    ///
+    /// # Parameters
+    /// - `model`: Caller-selected model descriptor.
+    ///
+    /// # Returns
+    /// The matching route, if one owns the model identity.
+    fn route_for(&self, model: &Model) -> Option<&Arc<dyn Provider>> {
+        self.routes.iter().find(|route| {
             route.models().iter().any(|candidate| {
                 candidate.provider == model.provider
                     && candidate.api == model.api
                     && candidate.id.eq_ignore_ascii_case(&model.id)
             })
-        });
-        match route {
-            Some(route) => route.stream_simple(model, context, options).await,
-            None => unbound_model_error(model, &self.id),
-        }
+        })
     }
 }
 
@@ -264,6 +351,85 @@ impl Provider for ConfiguredProvider {
         }
         self.inner.stream_simple(&model, context, &options).await
     }
+
+    async fn stream_simple_with_applied_settings(
+        &self,
+        requested: &Model,
+        context: &Context,
+        options: &SimpleStreamOptions,
+        callback: rpi_ai::AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        let Some((model, options)) = self.prepare_request(requested, options) else {
+            return unbound_model_error(requested, &self.id);
+        };
+        if !model.provider_options.is_empty() && self.provider_options_version != Some(1) {
+            return provider_options_error(&model, &self.id);
+        }
+        self.inner
+            .stream_simple_with_applied_settings(&model, context, &options, callback)
+            .await
+    }
+
+    async fn stream_simple_with_request_secret(
+        &self,
+        requested: &Model,
+        context: &Context,
+        options: &SimpleStreamOptions,
+        secret: &rpi_ai::RequestSecret,
+        bearer: bool,
+    ) -> AssistantMessageEventStream {
+        let Some((model, mut options)) = self.prepare_request(requested, options) else {
+            return unbound_model_error(requested, &self.id);
+        };
+        if !model.provider_options.is_empty() && self.provider_options_version != Some(1) {
+            return provider_options_error(&model, &self.id);
+        }
+        options.api_key = None;
+        self.inner
+            .stream_simple_with_request_secret(&model, context, &options, secret, bearer)
+            .await
+    }
+
+    async fn stream_simple_with_request_secret_and_applied_settings(
+        &self,
+        requested: &Model,
+        context: &Context,
+        options: &SimpleStreamOptions,
+        secret: &rpi_ai::RequestSecret,
+        bearer: bool,
+        callback: rpi_ai::AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        let Some((model, mut options)) = self.prepare_request(requested, options) else {
+            return unbound_model_error(requested, &self.id);
+        };
+        if !model.provider_options.is_empty() && self.provider_options_version != Some(1) {
+            return provider_options_error(&model, &self.id);
+        }
+        options.api_key = None;
+        self.inner
+            .stream_simple_with_request_secret_and_applied_settings(
+                &model, context, &options, secret, bearer, callback,
+            )
+            .await
+    }
+}
+
+impl ConfiguredProvider {
+    /// Resolve a request against the execution binding and API capability.
+    ///
+    /// # Parameters
+    /// - `requested`: Caller-selected model descriptor.
+    /// - `options`: Caller-supplied request options.
+    ///
+    /// # Returns
+    /// Canonical model and options when the request belongs to this binding.
+    fn prepare_request(
+        &self,
+        requested: &Model,
+        options: &SimpleStreamOptions,
+    ) -> Option<(Model, SimpleStreamOptions)> {
+        self.binding.prepare(requested, options)
+    }
 }
 
 /// Returns an error stream when opaque model options have no declared owner.
@@ -303,12 +469,18 @@ mod tests {
     struct RecordingFactory(Calls);
     struct RecordingProvider(Calls);
     impl ProviderFactory for RecordingFactory {
-        fn create(&self, _: &str, models: Vec<Model>, _: &settings::Settings) -> Arc<dyn Provider> {
+        fn create(
+            &self,
+            _: &str,
+            models: Vec<Model>,
+            _: Option<&[Model]>,
+            _: &settings::Settings,
+        ) -> Option<Arc<dyn Provider>> {
             assert!(
                 models.iter().all(|model| model.headers.is_none()),
                 "factories receive public descriptors"
             );
-            Arc::new(RecordingProvider(self.0.clone()))
+            Some(Arc::new(RecordingProvider(self.0.clone())))
         }
     }
     #[async_trait::async_trait]
