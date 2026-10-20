@@ -1677,6 +1677,7 @@ pub(super) fn save_provider_from_form(form: &ProviderFormState) -> Result<String
             context_window: None,
             max_tokens: None,
             cost: None,
+            sampling_params: None,
             input: None,
             headers: None,
             compat: None,

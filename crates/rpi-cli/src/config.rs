@@ -395,6 +395,9 @@ pub struct ModelDefinition {
     /// USD per million tokens, including optional long-context pricing tiers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<ModelCost>,
+    /// Provider-specific sampling parameters, preserved by `rpi-ai::Model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_params: Option<serde_json::Map<String, serde_json::Value>>,
     /// Free-form modality strings ("text"/"image"); unknown values fall back
     /// to text-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -889,6 +892,7 @@ pub fn provider_to_models(provider_id: &str, cfg: &ProviderConfig) -> Option<Vec
             m.cost = cost.clone();
             m.cost_configured = true;
         }
+        m.sampling_params = def.sampling_params.clone();
         m.input = parse_input_modalities(def.input.as_deref());
         // Merge: model-level headers, then provider-level headers (provider wins
         // on conflict — it's the more specific-to-this-endpoint declaration).
@@ -1260,6 +1264,7 @@ mod tests {
                 context_window: None,
                 max_tokens: None,
                 cost: None,
+                sampling_params: None,
                 input: None,
                 headers: None,
                 compat: None,
@@ -1465,6 +1470,7 @@ mod tests {
                 context_window: None,
                 max_tokens: None,
                 cost: None,
+                sampling_params: None,
                 input: None,
                 headers: None,
                 compat: None,
