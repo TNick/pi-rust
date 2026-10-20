@@ -3,7 +3,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use rpi_ai::Model;
 use serde::{Deserialize, Serialize};
+
+use crate::models::has_header_auth;
 
 /// A persisted credential value associated with one provider identity.
 #[derive(Clone, Serialize, Deserialize)]
@@ -113,4 +116,34 @@ impl fmt::Debug for ResolvedCredential {
             .field("bearer", &self.bearer)
             .finish()
     }
+}
+
+/// Derives a safe provider readiness source from resolved credentials and a
+/// credential-free or execution model catalog.
+///
+/// Header values are inspected only for presence. They are never returned or
+/// copied into the resulting status.
+///
+/// # Parameters
+/// - `provider`: Exact provider identity being checked.
+/// - `credential_source`: Source returned by host-injected credential lookup.
+/// - `models`: Model catalog that may contain provider-scoped auth headers.
+///
+/// # Returns
+/// The credential source, `Headers` when a model supplies auth, or `Missing`.
+pub fn readiness_from_catalog(
+    provider: &str,
+    credential_source: CredentialSource,
+    models: &[Model],
+) -> CredentialSource {
+    if credential_source.is_present() {
+        return credential_source;
+    }
+    if models
+        .iter()
+        .any(|model| model.provider == provider && has_header_auth(model.headers.as_ref()))
+    {
+        return CredentialSource::Headers;
+    }
+    CredentialSource::Missing
 }

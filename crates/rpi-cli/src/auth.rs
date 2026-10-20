@@ -375,9 +375,6 @@ fn detect_credential(
     let manifest = snapshot.and_then(|snapshot| snapshot.provider_manifest(provider));
     let resolved =
         crate::credentials::resolve(provider, models.providers.get(provider), &store, manifest);
-    if resolved.source.is_present() {
-        return Ok(resolved.source);
-    }
     let manifests = snapshot.map_or_else(Vec::new, |snapshot| {
         snapshot
             .providers()
@@ -386,12 +383,11 @@ fn detect_credential(
             .collect()
     });
     let catalog = crate::provider::execution_catalog_with_manifests(&manifests)?;
-    if catalog.iter().any(|model| {
-        model.provider == provider && crate::credentials::has_header_auth(model.headers.as_ref())
-    }) {
-        return Ok(CredentialSource::Headers);
-    }
-    Ok(CredentialSource::Missing)
+    Ok(rpi_model_runtime::readiness_from_catalog(
+        provider,
+        resolved.source,
+        &catalog,
+    ))
 }
 
 /// `rpi auth --help`. Mirrors the TS auth-command usage but scoped to v1.
