@@ -30,7 +30,9 @@ pub use models::{
     ConfigValueResolver, ModelDefinition, ModelsConfig, ProviderConfig,
 };
 pub use properties::{
-    model_property_descriptors, set_model_properties, set_model_property, ModelPropertyDescriptor,
+    model_property_descriptors, set_model_properties, set_model_property,
+    update_model_config_properties, update_model_config_property, ModelPropertyConfigError,
+    ModelPropertyDescriptor,
 };
 pub use provider_factory::{
     create_builtin_provider, create_builtin_provider_for_api, supports_builtin_provider_api,

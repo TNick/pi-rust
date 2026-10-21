@@ -330,12 +330,7 @@ pub fn provider_to_models(
     config: &ProviderConfig,
     resolver: &dyn ConfigValueResolver,
 ) -> Option<Vec<Model>> {
-    let api = match config.api.as_deref() {
-        None | Some("") | Some("anthropic-messages") => Api::AnthropicMessages,
-        Some("openai-completions") => Api::OpenaiCompletions,
-        Some("openai-responses") => Api::OpenaiResponses,
-        _ => return None,
-    };
+    let api = provider_api(config.api.as_deref())?;
     let provider_base = config.base_url.clone().unwrap_or_else(|| match api {
         Api::OpenaiCompletions | Api::OpenaiResponses => "https://api.openai.com".into(),
         _ => "https://api.anthropic.com".into(),
@@ -396,6 +391,16 @@ pub fn provider_to_models(
         models.push(model);
     }
     Some(models)
+}
+
+/// Resolves the built-in API identifiers supported by model configuration.
+pub(crate) fn provider_api(api: Option<&str>) -> Option<Api> {
+    Some(match api {
+        None | Some("") | Some("anthropic-messages") => Api::AnthropicMessages,
+        Some("openai-completions") => Api::OpenaiCompletions,
+        Some("openai-responses") => Api::OpenaiResponses,
+        _ => return None,
+    })
 }
 
 /// Parses model input modality names, defaulting to text when none are known.

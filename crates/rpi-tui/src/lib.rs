@@ -40,6 +40,7 @@ pub mod loader;
 pub mod markdown;
 pub mod mermaid;
 pub mod overlay;
+pub mod property_editor;
 pub mod render;
 pub mod scroll_view;
 pub mod search_bar;
@@ -120,6 +121,7 @@ pub use loader::{
 pub use markdown::{Markdown, MarkdownOptions};
 pub use mermaid::Mermaid;
 pub use overlay::{Dialog, OverlayHandle, OverlayManager, Selector, SelectorItem};
+pub use property_editor::{PropertyEditor, PropertyEditorItem};
 pub use scroll_view::{FollowMode, ScrollView, ScrollViewOptions};
 pub use search_bar::SearchBar;
 pub use searchable_select::SearchableSelectList;

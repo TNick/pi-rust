@@ -3859,6 +3859,10 @@ impl AgentHarness {
         let context_write_error = Arc::new(Mutex::new(None));
         let mut config = AgentLoopConfig {
             model: snap.model.clone(),
+            provider_continuation: None,
+            on_provider_continuation: None,
+            continuation_stream_fn: None,
+            continuation_extractor: None,
             convert_to_llm: convert,
             transform_context: snap.transform_context.clone(),
             get_api_key: None,

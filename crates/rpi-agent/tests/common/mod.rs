@@ -199,6 +199,10 @@ pub fn loop_config_with_converter(
 ) -> rpi_agent::AgentLoopConfig {
     rpi_agent::AgentLoopConfig {
         model: mock_model(),
+        provider_continuation: None,
+        on_provider_continuation: None,
+        continuation_stream_fn: None,
+        continuation_extractor: None,
         convert_to_llm,
         transform_context: None,
         get_api_key: None,

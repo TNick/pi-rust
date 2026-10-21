@@ -11,12 +11,13 @@
 //! throw — return a safe fallback instead.
 
 use crate::message::AgentMessage;
+use crate::stream_fn::{ContinuationExtractor, ContinuationStreamFn};
 use crate::types::{
     AfterToolCallContext, AfterToolCallResult, AgentLoopTurnUpdate, BeforeToolCallContext,
     BeforeToolCallResult, ShouldStopAfterTurnContext, ToolExecutionMode,
 };
 use futures::future::BoxFuture;
-use rpi_ai::provider::{CacheRetention, SimpleStreamOptions};
+use rpi_ai::provider::{CacheRetention, ProviderContinuation, SimpleStreamOptions};
 use rpi_ai::types::{Message, ThinkingLevel};
 use rpi_ai::Model;
 use std::sync::Arc;
@@ -99,6 +100,19 @@ pub type AfterToolCall = Arc<
 pub struct AgentLoopConfig {
     pub model: Model,
 
+    /// Optional provider continuation already validated by the host.
+    /// The agent loop does not decide branch/context validity.
+    pub provider_continuation: Option<ProviderContinuation>,
+
+    /// Reports an extracted handle so the host can retain it ephemerally and
+    /// associate it with its own branch/context fingerprint.
+    pub on_provider_continuation: Option<Arc<dyn Fn(Option<ProviderContinuation>) + Send + Sync>>,
+    /// Optional continuation-aware stream callback. When set, it receives the
+    /// validated handle for the first provider request in this agent run.
+    pub continuation_stream_fn: Option<ContinuationStreamFn>,
+    /// Extracts a provider handle from each completed assistant response.
+    pub continuation_extractor: Option<ContinuationExtractor>,
+
     /// Required: `AgentMessage[]` → `Message[]`. Never `None` at call time; the
     /// `AgentBuilder` installs `default_convert_to_llm` (drop custom roles) when
     /// the caller doesn't supply one.
@@ -133,6 +147,19 @@ impl std::fmt::Debug for AgentLoopConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentLoopConfig")
             .field("model", &self.model)
+            .field("provider_continuation", &self.provider_continuation)
+            .field(
+                "on_provider_continuation",
+                &self.on_provider_continuation.is_some(),
+            )
+            .field(
+                "continuation_stream_fn",
+                &self.continuation_stream_fn.is_some(),
+            )
+            .field(
+                "continuation_extractor",
+                &self.continuation_extractor.is_some(),
+            )
             .field("tool_execution", &self.tool_execution)
             .field("thinking_level", &self.thinking_level)
             .field("cache_retention", &self.cache_retention)

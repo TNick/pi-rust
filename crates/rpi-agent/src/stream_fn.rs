@@ -13,7 +13,7 @@
 //! installed via `set_default_stream_fn` — `pi-ai` providers are not silently
 //! picked so the agent crate stays free of provider wiring.
 
-use rpi_ai::provider::SimpleStreamOptions;
+use rpi_ai::provider::{ProviderContinuation, SimpleStreamOptions};
 use rpi_ai::types::Context;
 use rpi_ai::{AssistantMessageEventStream, Model};
 use std::sync::{Arc, OnceLock};
@@ -27,6 +27,27 @@ use std::sync::{Arc, OnceLock};
 /// spawns is already detached.
 pub type StreamFn = Arc<
     dyn Fn(&Model, &Context, &SimpleStreamOptions) -> AssistantMessageEventStream + Send + Sync,
+>;
+
+/// Optional continuation-aware provider call and response-handle extractor.
+///
+/// The caller owns validity policy and must only pass a handle it has already
+/// checked against its own branch/context identity. The agent loop keeps the
+/// handle ephemeral and reports extracted handles back to that caller.
+pub type ContinuationStreamFn = Arc<
+    dyn Fn(
+            &Model,
+            &Context,
+            &SimpleStreamOptions,
+            Option<&ProviderContinuation>,
+        ) -> AssistantMessageEventStream
+        + Send
+        + Sync,
+>;
+
+/// Extracts provider-owned continuation state from a completed response.
+pub type ContinuationExtractor = Arc<
+    dyn Fn(&Model, &rpi_ai::types::AssistantMessage) -> Option<ProviderContinuation> + Send + Sync,
 >;
 
 /// Build a `StreamFn` from any `Fn(&Model,&Context,&SimpleStreamOptions) ->

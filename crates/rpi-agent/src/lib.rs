@@ -42,7 +42,7 @@ pub use hooks::{
 };
 pub use message::{AgentMessage, AgentMessageRole, CustomMessage};
 pub use queue::PendingMessageQueue;
-pub use stream_fn::{stream_fn, StreamFn};
+pub use stream_fn::{stream_fn, ContinuationExtractor, ContinuationStreamFn, StreamFn};
 pub use types::{
     AfterToolCallContext, AfterToolCallResult, AgentContext, AgentLoopTurnUpdate, AgentState,
     AgentToolResult, BeforeToolCallContext, BeforeToolCallResult, QueueMode,

@@ -19,9 +19,12 @@ use crate::events::{AgentEmitter, AgentEvent, BroadcastEmitter};
 use crate::hooks::{default_convert_to_llm_fn, AgentLoopConfig, ConvertToLlm};
 use crate::message::AgentMessage;
 use crate::queue::PendingMessageQueue;
-use crate::stream_fn::{get_default_stream_fn, StreamFn};
+use crate::stream_fn::{
+    get_default_stream_fn, ContinuationExtractor, ContinuationStreamFn, StreamFn,
+};
 use crate::types::{AgentContext, AgentState, QueueMode, ToolExecutionMode};
 
+use rpi_ai::provider::ProviderContinuation;
 use rpi_ai::types::{AssistantMessage, UserContent, UserMessage};
 use rpi_ai::Model;
 use std::collections::HashSet;
@@ -37,6 +40,12 @@ pub struct AgentOptions {
     pub initial_state: Option<InitialState>,
     pub convert_to_llm: Option<ConvertToLlm>,
     pub stream_fn: Option<StreamFn>,
+    /// Optional continuation-aware provider callback.
+    pub continuation_stream_fn: Option<ContinuationStreamFn>,
+    /// Optional extraction callback for completed provider responses.
+    pub continuation_extractor: Option<ContinuationExtractor>,
+    /// Optional notification when a provider continuation is extracted.
+    pub on_provider_continuation: Option<Arc<dyn Fn(Option<ProviderContinuation>) + Send + Sync>>,
     pub thinking_level: Option<rpi_ai::types::ThinkingLevel>,
     pub queue_mode: Option<QueueMode>,
     pub follow_up_mode: Option<QueueMode>,
@@ -163,6 +172,10 @@ struct Inner {
     state: Arc<Mutex<MutableAgentState>>,
     convert_to_llm: ConvertToLlm,
     stream_fn: StreamFn,
+    continuation_stream_fn: Option<ContinuationStreamFn>,
+    continuation_extractor: Option<ContinuationExtractor>,
+    on_provider_continuation: Option<Arc<dyn Fn(Option<ProviderContinuation>) + Send + Sync>>,
+    provider_continuation: Arc<Mutex<Option<ProviderContinuation>>>,
     steering_queue: SharedQueue,
     follow_up_queue: SharedQueue,
     session_id: Option<String>,
@@ -225,6 +238,29 @@ impl AgentBuilder {
 
     pub fn stream_fn(mut self, stream_fn: StreamFn) -> Self {
         self.opts.stream_fn = Some(stream_fn);
+        self
+    }
+
+    /// Installs continuation handling for provider-specific opaque handles.
+    ///
+    /// The host must validate branch/context identity before setting a handle
+    /// on the built agent and clear it when that context becomes stale.
+    pub fn provider_continuation(
+        mut self,
+        stream_fn: ContinuationStreamFn,
+        extractor: ContinuationExtractor,
+    ) -> Self {
+        self.opts.continuation_stream_fn = Some(stream_fn);
+        self.opts.continuation_extractor = Some(extractor);
+        self
+    }
+
+    /// Installs a callback for newly extracted provider continuation state.
+    pub fn on_provider_continuation(
+        mut self,
+        callback: Arc<dyn Fn(Option<ProviderContinuation>) + Send + Sync>,
+    ) -> Self {
+        self.opts.on_provider_continuation = Some(callback);
         self
     }
 
@@ -294,6 +330,10 @@ impl AgentBuilder {
             state: Arc::new(Mutex::new(state)),
             convert_to_llm,
             stream_fn,
+            continuation_stream_fn: self.opts.continuation_stream_fn,
+            continuation_extractor: self.opts.continuation_extractor,
+            on_provider_continuation: self.opts.on_provider_continuation,
+            provider_continuation: Arc::new(Mutex::new(None)),
             steering_queue: Arc::new(Mutex::new(PendingMessageQueue::new(queue_mode))),
             follow_up_queue: Arc::new(Mutex::new(PendingMessageQueue::new(follow_up_mode))),
             session_id: self.opts.session_id,
@@ -325,6 +365,18 @@ impl Agent {
     /// mutate internal state. Mirrors TS `get state()`.
     pub fn state(&self) -> AgentState {
         self.inner.state.lock().expect("state lock").snapshot()
+    }
+
+    /// Supplies a host-validated continuation for the next provider request.
+    ///
+    /// Scriberig hosts should clear this when their branch/context fingerprint
+    /// no longer matches the handle's associated context.
+    pub fn set_provider_continuation(&self, continuation: Option<ProviderContinuation>) {
+        *self
+            .inner
+            .provider_continuation
+            .lock()
+            .expect("provider continuation lock") = continuation;
     }
 
     /// Queue a steering message (injected after the current turn's tool batch).
@@ -511,8 +563,19 @@ impl Agent {
         let state = self.inner.state.lock().expect("state lock");
         let steering = Arc::clone(&self.inner.steering_queue);
         let follow_up = Arc::clone(&self.inner.follow_up_queue);
-        AgentLoopConfig {
+        let provider_continuation = self
+            .inner
+            .provider_continuation
+            .lock()
+            .expect("provider continuation lock")
+            .clone();
+        let upstream_callback = self.inner.on_provider_continuation.clone();
+        let mut config = AgentLoopConfig {
             model: state.model.clone(),
+            provider_continuation,
+            on_provider_continuation: upstream_callback,
+            continuation_stream_fn: self.inner.continuation_stream_fn.clone(),
+            continuation_extractor: self.inner.continuation_extractor.clone(),
             convert_to_llm: Arc::clone(&self.inner.convert_to_llm),
             transform_context: None,
             get_api_key: None,
@@ -538,7 +601,18 @@ impl Agent {
             cache_retention: rpi_ai::provider::CacheRetention::default(),
             session_id: self.inner.session_id.clone(),
             signal,
+        };
+        if config.continuation_extractor.is_some() {
+            let inner = Arc::clone(&self.inner.provider_continuation);
+            let callback = config.on_provider_continuation.clone();
+            config.on_provider_continuation = Some(Arc::new(move |continuation| {
+                *inner.lock().expect("provider continuation lock") = continuation.clone();
+                if let Some(callback) = &callback {
+                    callback(continuation);
+                }
+            }));
         }
+        config
     }
 
     async fn run_prompt(&self, messages: Vec<AgentMessage>) -> Result<(), crate::AgentError> {

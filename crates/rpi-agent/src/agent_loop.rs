@@ -231,6 +231,7 @@ async fn run_loop(
     pending_assistant: Option<AssistantMessage>,
 ) -> Result<LoopOutcome, AgentError> {
     let mut pending_assistant = pending_assistant;
+    let mut provider_continuation = config.provider_continuation.clone();
     let mut first_turn = true;
     // Check for steering messages at start (user may have typed while waiting).
     let mut pending_messages = drain_steering(config).await;
@@ -275,8 +276,14 @@ async fn run_loop(
             let message = match pending_assistant.take() {
                 Some(message) => message,
                 None => {
-                    let message =
-                        stream_assistant_response(current_context, config, emit, stream_fn).await?;
+                    let message = stream_assistant_response(
+                        current_context,
+                        config,
+                        emit,
+                        stream_fn,
+                        provider_continuation.take(),
+                    )
+                    .await?;
                     new_messages.push(AgentMessage::Assistant(Box::new(message.clone())));
                     message
                 }
@@ -443,6 +450,7 @@ async fn stream_assistant_response(
     config: &AgentLoopConfig,
     emit: &Arc<dyn AgentEmitter>,
     stream_fn: &StreamFn,
+    continuation: Option<rpi_ai::provider::ProviderContinuation>,
 ) -> Result<AssistantMessage, AgentError> {
     // Apply optional transform_context (AgentMessage[] → AgentMessage[]).
     let messages = if let Some(transform) = &config.transform_context {
@@ -474,7 +482,11 @@ async fn stream_assistant_response(
     };
 
     let opts = config.to_stream_options(resolved_api_key);
-    let mut response = stream_fn(&config.model, &llm_context, &opts);
+    let mut response = if let Some(continuation_stream_fn) = &config.continuation_stream_fn {
+        continuation_stream_fn(&config.model, &llm_context, &opts, continuation.as_ref())
+    } else {
+        stream_fn(&config.model, &llm_context, &opts)
+    };
 
     let mut added_partial = false;
 
@@ -521,6 +533,7 @@ async fn stream_assistant_response(
                         "assistant-message event stream ended without a terminal event".into(),
                     )
                 })?;
+                report_provider_continuation(config, &final_message);
                 let am = AgentMessage::Assistant(Box::new(final_message.clone()));
                 if added_partial {
                     if let Some(last) = context.messages.last_mut() {
@@ -547,6 +560,7 @@ async fn stream_assistant_response(
     let final_message = response.result().await.map_err(|_| {
         AgentError::Provider("assistant-message event stream ended without a terminal event".into())
     })?;
+    report_provider_continuation(config, &final_message);
     let am = AgentMessage::Assistant(Box::new(final_message.clone()));
     if added_partial {
         if let Some(last) = context.messages.last_mut() {
@@ -564,6 +578,18 @@ async fn stream_assistant_response(
     }
     emit_event(emit, AgentEvent::MessageEnd { message: am }).await;
     Ok(final_message)
+}
+
+/// Extracts and reports opaque response state without assigning host semantics.
+fn report_provider_continuation(config: &AgentLoopConfig, message: &AssistantMessage) {
+    let Some(callback) = &config.on_provider_continuation else {
+        return;
+    };
+    let continuation = config
+        .continuation_extractor
+        .as_ref()
+        .and_then(|extract| extract(&config.model, message));
+    callback(continuation);
 }
 
 // ----------------------------------------------------------------------------
