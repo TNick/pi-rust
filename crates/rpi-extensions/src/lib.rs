@@ -93,9 +93,10 @@ pub use provider_reload::{
 };
 pub use registry::{
     assert_active, current_platform, platform_allows, BeforeAgentStartHandler, ExtensionRegistry,
-    ExtensionTool, ProviderManifest, RegisteredFlag, RegisteredHandler, RegisteredOAuthProvider,
-    RegisteredProvider, RegisteredRenderer, RegisteredRendererKind, RegisteredShortcut,
-    RegistryEntry, RegistrySnapshot, ResourcesDiscoverHandler, DEFAULT_PRIORITY,
+    ExtensionTool, ExtensionToolOrigin, ProviderManifest, RegisteredFlag, RegisteredHandler,
+    RegisteredOAuthProvider, RegisteredProvider, RegisteredRenderer, RegisteredRendererKind,
+    RegisteredShortcut, RegistryEntry, RegistrySnapshot, ResourcesDiscoverHandler,
+    DEFAULT_PRIORITY,
 };
 pub use resources::{emit_resources_discover, DiscoveredResources};
 pub use status::ExtensionStatusMailbox;
@@ -418,7 +419,8 @@ extern "C" fn trampoline_register_tool(
             .action_bridge
             .as_ref()
             .map(|bridge| bridge.user_data() as usize);
-        api.with_registry(|reg| reg.register_tool(tool, handle))
+        let extension_id = api.name.clone();
+        api.with_registry(|reg| reg.register_tool_from(extension_id, tool, handle))
             .is_some()
     });
     if ok == Some(true) {

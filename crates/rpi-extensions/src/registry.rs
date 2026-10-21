@@ -79,12 +79,35 @@ fn requires_auth_default() -> bool {
 pub struct ExtensionTool {
     /// The provider-facing tool definition (name/description/parameters).
     pub tool: Tool,
+    /// Host-stamped registration origin, separate from plugin-controlled data.
+    pub origin: ExtensionToolOrigin,
     pub(crate) handle: PluginToolHandle,
 }
 
 impl ExtensionTool {
     pub fn new(tool: Tool, handle: PluginToolHandle) -> Self {
-        Self { tool, handle }
+        Self::new_from(tool, handle, "<unattributed-extension>")
+    }
+
+    /// Creates a registration with its host-known extension identity.
+    ///
+    /// # Parameters
+    /// - `tool`: Provider-facing tool schema.
+    /// - `handle`: Opaque plugin execution handle.
+    /// - `extension_id`: Host-stamped identity of the registering extension.
+    ///
+    /// # Returns
+    /// The registered tool and its stable host-observed origin.
+    pub fn new_from(tool: Tool, handle: PluginToolHandle, extension_id: impl Into<String>) -> Self {
+        let origin = ExtensionToolOrigin {
+            extension_id: extension_id.into(),
+            tool_name: tool.name.clone(),
+        };
+        Self {
+            tool,
+            origin,
+            handle,
+        }
     }
 
     /// The plugin-side function handles backing this tool. `Copy` (fn pointers
@@ -94,6 +117,22 @@ impl ExtensionTool {
     pub fn handle(&self) -> PluginToolHandle {
         self.handle
     }
+}
+
+/// Identifies the host-observed extension registration that owns one tool.
+///
+/// # Public members
+/// - `extension_id`: Host-stamped identity derived from the loaded extension.
+/// - `tool_name`: Tool name supplied by its registration schema.
+///
+/// # Private members
+/// None.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionToolOrigin {
+    /// Host-stamped identity derived from the loaded extension.
+    pub extension_id: String,
+    /// Tool name supplied by its registration schema.
+    pub tool_name: String,
 }
 
 /// A registered slash command and its plugin callback.
@@ -443,6 +482,24 @@ impl ExtensionRegistry {
     /// Register a tool. Returns `true` if a **prior** tool of the same name was
     /// kept (first-wins: the new one is dropped). Returns `false` on insert.
     pub fn register_tool(&mut self, tool: Tool, handle: PluginToolHandle) -> bool {
+        self.register_tool_from("<unattributed-extension>", tool, handle)
+    }
+
+    /// Register a tool with its host-known extension identity.
+    ///
+    /// # Parameters
+    /// - `extension_id`: Host-stamped identity of the registering extension.
+    /// - `tool`: Provider-facing tool schema.
+    /// - `handle`: Opaque plugin execution handle.
+    ///
+    /// # Returns
+    /// `true` when an earlier tool with the same name remains registered.
+    pub fn register_tool_from(
+        &mut self,
+        extension_id: impl Into<String>,
+        tool: Tool,
+        handle: PluginToolHandle,
+    ) -> bool {
         if self.tools.iter().any(|t| t.tool.name == tool.name) {
             // First-wins: keep the prior, drop the new handle. We must destroy
             // the dropped handle's allocation? No — `handle` is just fn pointers
@@ -452,7 +509,8 @@ impl ExtensionRegistry {
             // registration, so nothing to free.
             return true;
         }
-        self.tools.push(ExtensionTool::new(tool, handle));
+        self.tools
+            .push(ExtensionTool::new_from(tool, handle, extension_id));
         false
     }
 
@@ -838,6 +896,7 @@ impl ExtensionRegistry {
                 .iter()
                 .map(|t| ExtensionTool {
                     tool: t.tool.clone(),
+                    origin: t.origin.clone(),
                     handle: t.handle,
                 })
                 .collect(),
@@ -1134,6 +1193,7 @@ impl RegistrySnapshot {
         for t in &self.tools {
             v.push(RegistryEntry::Tool(ExtensionTool {
                 tool: t.tool.clone(),
+                origin: t.origin.clone(),
                 handle: t.handle,
             }));
         }

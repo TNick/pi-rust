@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::host_free_string;
 use crate::loader::PluginKeepalive;
+use crate::registry::{ExtensionTool, ExtensionToolOrigin};
 
 // ---------------------------------------------------------------------------
 // PluginToolHandle — the 4-fn bundle + the plugin's free_string
@@ -298,8 +299,15 @@ fn inject_tool_context(params: Value, context: &ToolCallContext) -> Value {
 /// is `Arc`-shared with every other adapter built from the same session, so the
 /// last drop — which can only happen once the harness's tool vec drops — unloads.
 pub struct PluginToolAdapter {
+    /// Provider-facing schema supplied by the registration.
     schema: Tool,
+    /// Safe activity label derived from the tool schema.
     label: String,
+    /// Host-stamped extension and tool registration identity.
+    origin: ExtensionToolOrigin,
+    /// Optional host policy run before extension code is called.
+    authorization: Option<PluginToolAuthorization>,
+    /// Opaque plugin execution callbacks.
     handle: PluginToolHandle,
     /// Injected into every call's arguments under
     /// [`rpi_plugin_sdk::HOST_CONTEXT_KEY`]. `Default` (nothing known) until the
@@ -315,15 +323,24 @@ pub struct PluginToolAdapter {
     keepalive: Arc<PluginKeepalive>,
 }
 
+/// Host policy called before plugin code receives tool arguments.
+pub type PluginToolAuthorization = Arc<dyn Fn(&ExtensionToolOrigin, &Value) -> bool + Send + Sync>;
+
 impl PluginToolAdapter {
     /// Build an adapter from the registered schema + handle + the session's
     /// keepalive. `label` defaults to the tool name. The keepalive clone keeps
     /// the owning cdylib mapped for the adapter's lifetime.
     pub fn new(schema: Tool, handle: PluginToolHandle, keepalive: Arc<PluginKeepalive>) -> Self {
         let label = schema.name.clone();
+        let origin = ExtensionToolOrigin {
+            extension_id: "<unattributed-extension>".to_owned(),
+            tool_name: schema.name.clone(),
+        };
         Self {
             schema,
             label,
+            origin,
+            authorization: None,
             handle,
             context: ToolCallContext::default(),
             keepalive,
@@ -336,6 +353,58 @@ impl PluginToolAdapter {
     pub fn with_context(mut self, context: ToolCallContext) -> Self {
         self.context = context;
         self
+    }
+
+    /// Stamps the host-observed origin of a registered tool onto its adapter.
+    ///
+    /// # Parameters
+    /// - `origin`: Identity copied from the extension registry.
+    ///
+    /// # Returns
+    /// The adapter with its origin available to host authorization policy.
+    pub fn with_origin(mut self, origin: ExtensionToolOrigin) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    /// Returns the host-observed registration origin.
+    ///
+    /// # Returns
+    /// The extension identity and registered tool name.
+    pub fn origin(&self) -> &ExtensionToolOrigin {
+        &self.origin
+    }
+
+    /// Installs a host policy that runs before any plugin execution callback.
+    ///
+    /// The hook should authorize the origin and arguments using host-owned
+    /// policy. A denied call returns a generic tool error without invoking
+    /// plugin code.
+    ///
+    /// # Parameters
+    /// - `authorization`: Host policy for this adapter's origin and arguments.
+    ///
+    /// # Returns
+    /// The adapter with pre-execution authorization enabled.
+    pub fn with_pre_execute_authorizer<F>(mut self, authorization: F) -> Self
+    where
+        F: Fn(&ExtensionToolOrigin, &Value) -> bool + Send + Sync + 'static,
+    {
+        self.authorization = Some(Arc::new(authorization));
+        self
+    }
+
+    /// Builds an adapter from a host registry entry and its session keepalive.
+    ///
+    /// # Parameters
+    /// - `registered`: Registry entry with its host-stamped origin.
+    /// - `keepalive`: Session library owner retained through every tool call.
+    ///
+    /// # Returns
+    /// An adapter preserving the registered tool's origin and schema.
+    pub fn from_registered(registered: &ExtensionTool, keepalive: Arc<PluginKeepalive>) -> Self {
+        Self::new(registered.tool.clone(), registered.handle(), keepalive)
+            .with_origin(registered.origin.clone())
     }
 }
 
@@ -401,6 +470,13 @@ impl AgentTool for PluginToolAdapter {
         signal: CancellationToken,
         on_update: Arc<dyn Fn(ToolResultPartial) + Send + Sync>,
     ) -> Result<AgentToolResult, AgentError> {
+        if self
+            .authorization
+            .as_ref()
+            .is_some_and(|authorize| !authorize(&self.origin, &params))
+        {
+            return Err(AgentError::Tool("plugin tool is not authorized".into()));
+        }
         // 1. Acquire the ambient runtime (the adapter only runs inside the agent
         //    loop's runtime). Do NOT own a runtime.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
@@ -636,6 +712,7 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     static DESTROY_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static EXECUTE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static CANCEL_COUNT: AtomicUsize = AtomicUsize::new(0);
     static PRODUCER_FREES: AtomicUsize = AtomicUsize::new(0);
 
@@ -748,6 +825,7 @@ mod tests {
         params: StbString,
         free: Option<FreeStringFn>,
     ) -> StepHandle {
+        EXECUTE_COUNT.fetch_add(1, Ordering::SeqCst);
         // SAFETY: execute transfers live parameters with their producer.
         let owned = unsafe { OwnedString::from_raw(params, free) };
         *LAST_PARAMS.lock().unwrap() = Some(owned.to_string_lossy());
@@ -817,6 +895,7 @@ mod tests {
 
     fn reset_counters() {
         DESTROY_COUNT.store(0, Ordering::SeqCst);
+        EXECUTE_COUNT.store(0, Ordering::SeqCst);
         CANCEL_COUNT.store(0, Ordering::SeqCst);
     }
 
@@ -842,6 +921,39 @@ mod tests {
             0,
             "no cancel in happy path"
         );
+    }
+
+    #[tokio::test]
+    async fn host_authorizer_denies_before_plugin_execute() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_counters();
+        let expected_origin = ExtensionToolOrigin {
+            extension_id: "approved-extension".to_owned(),
+            tool_name: "echo".to_owned(),
+        };
+        let observed = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&observed);
+        let adapter = echo_adapter()
+            .with_origin(expected_origin.clone())
+            .with_pre_execute_authorizer(move |origin, params| {
+                *capture.lock().unwrap() = Some((origin.clone(), params.clone()));
+                false
+            });
+
+        let result = adapter
+            .execute(
+                "denied_call",
+                serde_json::json!({"sensitive": "must not reach plugin"}),
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(EXECUTE_COUNT.load(Ordering::SeqCst), 0);
+        let (origin, params) = observed.lock().unwrap().clone().unwrap();
+        assert_eq!(origin, expected_origin);
+        assert_eq!(params["sensitive"], "must not reach plugin");
     }
 
     #[tokio::test]
