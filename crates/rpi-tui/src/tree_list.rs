@@ -70,38 +70,7 @@ impl TreeList {
     /// # Errors
     /// Returns an error for duplicate or empty IDs, missing parents, or cycles.
     pub fn new(items: Vec<TreeItem>, max_visible: usize) -> Result<Self, String> {
-        let mut item_index = HashMap::new();
-        for (index, item) in items.iter().enumerate() {
-            if item.id.is_empty() || item_index.insert(item.id.clone(), index).is_some() {
-                return Err(format!(
-                    "tree item ID is empty or duplicated: `{}`",
-                    item.id
-                ));
-            }
-        }
-
-        let mut children: HashMap<Option<String>, Vec<String>> = HashMap::new();
-        for item in &items {
-            if let Some(parent) = &item.parent_id {
-                if !item_index.contains_key(parent) {
-                    return Err(format!(
-                        "tree item `{}` has missing parent `{parent}`",
-                        item.id
-                    ));
-                }
-            }
-            children
-                .entry(item.parent_id.clone())
-                .or_default()
-                .push(item.id.clone());
-        }
-
-        let mut depths = HashMap::new();
-        for item in &items {
-            let depth = item_depth(item, &item_index, &items)?;
-            depths.insert(item.id.clone(), depth);
-        }
-
+        let (item_index, children, depths) = build_indexes(&items)?;
         let roots = children.get(&None).cloned().unwrap_or_default();
         let mut expanded = HashSet::new();
         for root in roots {
@@ -130,6 +99,61 @@ impl TreeList {
         Ok(tree)
     }
 
+    /// Returns the current caller-provided items in display order.
+    pub fn items(&self) -> &[TreeItem] {
+        &self.items
+    }
+
+    /// Replaces every item while preserving stable selection and expansion state.
+    ///
+    /// The complete replacement is validated before any tree state changes.
+    /// Selection is retained when the selected ID still exists; otherwise the
+    /// first new item becomes selected, or selection is cleared when no items
+    /// remain. Expansion is retained only for surviving parents that still have
+    /// children, and newly added parents are expanded so newly projected content
+    /// is visible. Removed IDs are dropped from selection and expansion state.
+    ///
+    /// # Parameters
+    /// - `items`: Complete replacement in caller-defined sibling order.
+    ///
+    /// # Returns
+    /// `Ok(())` when indexes and cached visible rows were rebuilt.
+    ///
+    /// # Errors
+    /// Returns an error for duplicate or empty IDs, missing parents, cycles, or
+    /// a poisoned tree-state lock. Invalid input leaves the previous items and
+    /// selection state unchanged.
+    pub fn replace_items(&mut self, items: Vec<TreeItem>) -> Result<(), String> {
+        let (item_index, children, depths) = build_indexes(&items)?;
+        let Ok(mut state) = self.state.lock() else {
+            return Err("tree list state lock is poisoned".to_owned());
+        };
+        let previous_ids = self.item_index.keys().cloned().collect::<HashSet<_>>();
+        self.items = items;
+        self.item_index = item_index;
+        self.children = children;
+        self.depths = depths;
+        state.expanded.retain(|id| self.has_children(id));
+        for item in &self.items {
+            if !previous_ids.contains(&item.id) && self.has_children(&item.id) {
+                state.expanded.insert(item.id.clone());
+            }
+        }
+        if state
+            .selected
+            .as_ref()
+            .is_some_and(|id| !self.item_index.contains_key(id))
+        {
+            state.selected = self.items.first().map(|item| item.id.clone());
+        }
+        if let Some(selected) = state.selected.clone() {
+            self.expand_ancestors(&mut state, &selected);
+        }
+        self.rebuild_visible(&mut state);
+        self.keep_selection_visible(&mut state);
+        Ok(())
+    }
+
     /// Returns the currently selected caller-provided ID.
     pub fn selected_id(&self) -> Option<String> {
         self.state.lock().ok()?.selected.clone()
@@ -149,18 +173,7 @@ impl TreeList {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        let mut parent = self
-            .item_index
-            .get(id)
-            .and_then(|index| self.items[*index].parent_id.clone());
-        let mut expanded = false;
-        while let Some(parent_id) = parent {
-            expanded |= state.expanded.insert(parent_id.clone());
-            parent = self
-                .item_index
-                .get(&parent_id)
-                .and_then(|index| self.items[*index].parent_id.clone());
-        }
+        let expanded = self.expand_ancestors(&mut state, id);
         if expanded {
             state.selected = Some(id.to_owned());
             self.rebuild_visible(&mut state);
@@ -345,6 +358,30 @@ impl TreeList {
         }
     }
 
+    /// Marks every ancestor of one item expanded so the item becomes visible.
+    ///
+    /// # Parameters
+    /// - `state`: Locked tree state receiving expansion markers.
+    /// - `id`: Existing item whose ancestor path should be visible.
+    ///
+    /// # Returns
+    /// `true` when at least one ancestor was newly expanded.
+    fn expand_ancestors(&self, state: &mut TreeState, id: &str) -> bool {
+        let mut expanded = false;
+        let mut parent = self
+            .item_index
+            .get(id)
+            .and_then(|index| self.items[*index].parent_id.clone());
+        while let Some(parent_id) = parent {
+            expanded |= state.expanded.insert(parent_id.clone());
+            parent = self
+                .item_index
+                .get(&parent_id)
+                .and_then(|index| self.items[*index].parent_id.clone());
+        }
+        expanded
+    }
+
     /// Reports whether an item has child items.
     fn has_children(&self, id: &str) -> bool {
         self.children.contains_key(&Some(id.to_owned()))
@@ -446,6 +483,60 @@ impl TreeList {
         };
         self.select(&parent)
     }
+}
+
+/// Validates a complete item set and builds its lookup indexes.
+///
+/// # Parameters
+/// - `items`: Items in caller-defined sibling order.
+///
+/// # Returns
+/// Item-position index, ordered children by parent, and checked item depths.
+///
+/// # Errors
+/// Returns an error for duplicate or empty IDs, missing parents, or cycles.
+fn build_indexes(
+    items: &[TreeItem],
+) -> Result<
+    (
+        HashMap<String, usize>,
+        HashMap<Option<String>, Vec<String>>,
+        HashMap<String, usize>,
+    ),
+    String,
+> {
+    let mut item_index = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.id.is_empty() || item_index.insert(item.id.clone(), index).is_some() {
+            return Err(format!(
+                "tree item ID is empty or duplicated: `{}`",
+                item.id
+            ));
+        }
+    }
+
+    let mut children: HashMap<Option<String>, Vec<String>> = HashMap::new();
+    for item in items {
+        if let Some(parent) = &item.parent_id {
+            if !item_index.contains_key(parent) {
+                return Err(format!(
+                    "tree item `{}` has missing parent `{parent}`",
+                    item.id
+                ));
+            }
+        }
+        children
+            .entry(item.parent_id.clone())
+            .or_default()
+            .push(item.id.clone());
+    }
+
+    let mut depths = HashMap::new();
+    for item in items {
+        let depth = item_depth(item, &item_index, items)?;
+        depths.insert(item.id.clone(), depth);
+    }
+    Ok((item_index, children, depths))
 }
 
 /// Computes a checked depth for one item and rejects parent cycles.
@@ -579,5 +670,94 @@ mod tests {
         assert!(TreeList::new(vec![item("x", None), item("x", None)], 4).is_err());
         assert!(TreeList::new(vec![item("x", Some("missing"))], 4).is_err());
         assert!(TreeList::new(vec![item("a", Some("b")), item("b", Some("a"))], 4).is_err());
+    }
+
+    /// Retains selection and expansion for IDs that survive replacement.
+    #[test]
+    fn replacement_preserves_stable_selection_and_expansion() {
+        let mut tree = TreeList::new(
+            vec![
+                item("root", None),
+                item("a", Some("root")),
+                item("b", Some("root")),
+                item("other", None),
+            ],
+            8,
+        )
+        .unwrap();
+        assert!(tree.select("a"));
+        assert!(
+            tree.replace_items(vec![
+                item("root", None),
+                item("a", Some("root")),
+                item("c", Some("root")),
+                item("other", None),
+            ])
+            .is_ok()
+        );
+
+        assert_eq!(tree.selected_id().as_deref(), Some("a"));
+        let rows = tree.visible_rows();
+        assert!(rows.iter().any(|row| row.id == "c"));
+        assert!(!rows.iter().any(|row| row.id == "b"));
+    }
+
+    /// Leaves collapsed surviving parents collapsed and expands new parents.
+    #[test]
+    fn replacement_keeps_collapsed_parents_and_expands_new_parents() {
+        let mut tree = TreeList::new(
+            vec![
+                item("root", None),
+                item("parent", Some("root")),
+                item("leaf", Some("parent")),
+                item("other", None),
+            ],
+            8,
+        )
+        .unwrap();
+        assert!(tree.select("leaf"));
+        assert!(tree.select("other"));
+        assert!(tree.set_expanded("parent", false));
+        assert!(
+            tree.replace_items(vec![
+                item("root", None),
+                item("parent", Some("root")),
+                item("leaf", Some("parent")),
+                item("other", None),
+                item("new-parent", Some("root")),
+                item("new-leaf", Some("new-parent")),
+            ])
+            .is_ok()
+        );
+
+        assert_eq!(tree.selected_id().as_deref(), Some("other"));
+        let rows = tree.visible_rows();
+        assert!(!rows.iter().any(|row| row.id == "leaf"));
+        assert!(rows.iter().any(|row| row.id == "new-leaf"));
+    }
+
+    /// Falls back predictably when the selected ID disappears.
+    #[test]
+    fn replacement_selects_the_first_surviving_item_when_selection_is_removed() {
+        let mut tree = TreeList::new(vec![item("a", None), item("b", None)], 8).unwrap();
+        assert!(tree.select("b"));
+        assert!(tree.replace_items(vec![item("a", None)]).is_ok());
+
+        assert_eq!(tree.selected_id().as_deref(), Some("a"));
+        assert_eq!(tree.items().len(), 1);
+        assert_eq!(tree.visible_rows().len(), 1);
+    }
+
+    /// Rejects invalid replacements without changing current items or selection.
+    #[test]
+    fn invalid_replacement_preserves_the_previous_tree() {
+        let mut tree = TreeList::new(vec![item("a", None)], 8).unwrap();
+        assert!(
+            tree.replace_items(vec![item("a", None), item("a", None)])
+                .is_err()
+        );
+
+        assert_eq!(tree.items().len(), 1);
+        assert_eq!(tree.selected_id().as_deref(), Some("a"));
     }
 }
