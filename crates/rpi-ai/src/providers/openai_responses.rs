@@ -1903,7 +1903,7 @@ fn build_continuation_request(
 /// - `continuation_response_id`: Optional prior response to resume from.
 ///
 /// # Returns
-/// The request body, or `None` when the continuation anchor is missing.
+/// The request body, or `None` when this context cannot form a request.
 fn build_request_from(
     model: &Model,
     ctx: &Context,
@@ -1917,9 +1917,6 @@ fn build_request_from(
             matches!(message, Message::Assistant(assistant) if assistant.response_id.as_deref() == Some(response_id))
         })
     });
-    if continuation_response_id.is_some() && continuation_anchor.is_none() {
-        return None;
-    }
 
     // First pass: normalize and index every replayable tool call.  The second
     // pass can then resolve results even when a legacy session stores only an
@@ -4148,7 +4145,7 @@ mod tests {
     }
 
     #[test]
-    fn continuation_request_rejects_missing_response_anchor() {
+    fn continuation_request_accepts_fresh_context_without_response_object() {
         let body = build_continuation_request(
             &model(),
             &Context::new(vec![Message::User(crate::types::UserMessage::new(
@@ -4157,9 +4154,12 @@ mod tests {
             ))]),
             &SimpleStreamOptions::default(),
             Some("resp_missing"),
-        );
+        )
+        .expect("host-validated continuation accepts fresh context");
 
-        assert!(body.is_none());
+        assert_eq!(body["previous_response_id"], "resp_missing");
+        assert_eq!(body["input"].as_array().unwrap().len(), 1);
+        assert_eq!(body["input"][0]["content"][0]["text"], "new input");
     }
 
     #[test]
