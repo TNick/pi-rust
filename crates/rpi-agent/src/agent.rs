@@ -16,20 +16,21 @@
 
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::events::{AgentEmitter, AgentEvent, BroadcastEmitter};
-use crate::hooks::{default_convert_to_llm_fn, AgentLoopConfig, ConvertToLlm};
+use crate::hooks::{AgentLoopConfig, ConvertToLlm, default_convert_to_llm_fn};
 use crate::message::AgentMessage;
 use crate::queue::PendingMessageQueue;
 use crate::stream_fn::{
-    get_default_stream_fn, ContinuationExtractor, ContinuationStreamFn, StreamFn,
+    CancellableContinuationStreamFn, ContinuationExtractor, ContinuationStreamFn, StreamFn,
+    get_default_stream_fn,
 };
 use crate::types::{AgentContext, AgentState, QueueMode, ToolExecutionMode};
 
+use rpi_ai::Model;
 use rpi_ai::provider::ProviderContinuation;
 use rpi_ai::types::{AssistantMessage, UserContent, UserMessage};
-use rpi_ai::Model;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
 /// Options for constructing an [`Agent`]. Mirrors TS `AgentOptions`. Only
@@ -42,6 +43,8 @@ pub struct AgentOptions {
     pub stream_fn: Option<StreamFn>,
     /// Optional continuation-aware provider callback.
     pub continuation_stream_fn: Option<ContinuationStreamFn>,
+    /// Optional cancellation-aware continuation provider callback.
+    pub cancellable_continuation_stream_fn: Option<CancellableContinuationStreamFn>,
     /// Optional extraction callback for completed provider responses.
     pub continuation_extractor: Option<ContinuationExtractor>,
     /// Optional notification when a provider continuation is extracted.
@@ -173,6 +176,7 @@ struct Inner {
     convert_to_llm: ConvertToLlm,
     stream_fn: StreamFn,
     continuation_stream_fn: Option<ContinuationStreamFn>,
+    cancellable_continuation_stream_fn: Option<CancellableContinuationStreamFn>,
     continuation_extractor: Option<ContinuationExtractor>,
     on_provider_continuation: Option<Arc<dyn Fn(Option<ProviderContinuation>) + Send + Sync>>,
     provider_continuation: Arc<Mutex<Option<ProviderContinuation>>>,
@@ -255,6 +259,17 @@ impl AgentBuilder {
         self
     }
 
+    /// Installs a cancellation-aware continuation provider callback.
+    pub fn cancellable_provider_continuation(
+        mut self,
+        stream_fn: CancellableContinuationStreamFn,
+        extractor: ContinuationExtractor,
+    ) -> Self {
+        self.opts.cancellable_continuation_stream_fn = Some(stream_fn);
+        self.opts.continuation_extractor = Some(extractor);
+        self
+    }
+
     /// Installs a callback for newly extracted provider continuation state.
     pub fn on_provider_continuation(
         mut self,
@@ -331,6 +346,7 @@ impl AgentBuilder {
             convert_to_llm,
             stream_fn,
             continuation_stream_fn: self.opts.continuation_stream_fn,
+            cancellable_continuation_stream_fn: self.opts.cancellable_continuation_stream_fn,
             continuation_extractor: self.opts.continuation_extractor,
             on_provider_continuation: self.opts.on_provider_continuation,
             provider_continuation: Arc::new(Mutex::new(None)),
@@ -575,6 +591,10 @@ impl Agent {
             provider_continuation,
             on_provider_continuation: upstream_callback,
             continuation_stream_fn: self.inner.continuation_stream_fn.clone(),
+            cancellable_continuation_stream_fn: self
+                .inner
+                .cancellable_continuation_stream_fn
+                .clone(),
             continuation_extractor: self.inner.continuation_extractor.clone(),
             convert_to_llm: Arc::clone(&self.inner.convert_to_llm),
             transform_context: None,

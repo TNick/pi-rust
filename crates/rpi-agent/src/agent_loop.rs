@@ -35,8 +35,8 @@ use rpi_ai::types::{
     ToolResultMessage, ToolResultRole,
 };
 use rpi_ai::validate_tool_arguments;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The messages a single `run_agent_loop` invocation added (prompt + assistant
 /// + tool results + injected steering/follow-ups). Returned to the caller.
@@ -482,11 +482,20 @@ async fn stream_assistant_response(
     };
 
     let opts = config.to_stream_options(resolved_api_key);
-    let mut response = if let Some(continuation_stream_fn) = &config.continuation_stream_fn {
-        continuation_stream_fn(&config.model, &llm_context, &opts, continuation.as_ref())
-    } else {
-        stream_fn(&config.model, &llm_context, &opts)
-    };
+    let mut response =
+        if let Some(continuation_stream_fn) = &config.cancellable_continuation_stream_fn {
+            continuation_stream_fn(
+                &config.model,
+                &llm_context,
+                &opts,
+                continuation.as_ref(),
+                config.signal.clone(),
+            )
+        } else if let Some(continuation_stream_fn) = &config.continuation_stream_fn {
+            continuation_stream_fn(&config.model, &llm_context, &opts, continuation.as_ref())
+        } else {
+            stream_fn(&config.model, &llm_context, &opts)
+        };
 
     let mut added_partial = false;
 

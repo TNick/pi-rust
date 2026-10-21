@@ -202,6 +202,7 @@ pub fn loop_config_with_converter(
         provider_continuation: None,
         on_provider_continuation: None,
         continuation_stream_fn: None,
+        cancellable_continuation_stream_fn: None,
         continuation_extractor: None,
         convert_to_llm,
         transform_context: None,

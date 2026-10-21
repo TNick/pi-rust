@@ -11,15 +11,17 @@
 //! throw — return a safe fallback instead.
 
 use crate::message::AgentMessage;
-use crate::stream_fn::{ContinuationExtractor, ContinuationStreamFn};
+use crate::stream_fn::{
+    CancellableContinuationStreamFn, ContinuationExtractor, ContinuationStreamFn,
+};
 use crate::types::{
     AfterToolCallContext, AfterToolCallResult, AgentLoopTurnUpdate, BeforeToolCallContext,
     BeforeToolCallResult, ShouldStopAfterTurnContext, ToolExecutionMode,
 };
 use futures::future::BoxFuture;
+use rpi_ai::Model;
 use rpi_ai::provider::{CacheRetention, ProviderContinuation, SimpleStreamOptions};
 use rpi_ai::types::{Message, ThinkingLevel};
-use rpi_ai::Model;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -110,6 +112,8 @@ pub struct AgentLoopConfig {
     /// Optional continuation-aware stream callback. When set, it receives the
     /// validated handle for the first provider request in this agent run.
     pub continuation_stream_fn: Option<ContinuationStreamFn>,
+    /// Cancellation-aware continuation stream callback.
+    pub cancellable_continuation_stream_fn: Option<CancellableContinuationStreamFn>,
     /// Extracts a provider handle from each completed assistant response.
     pub continuation_extractor: Option<ContinuationExtractor>,
 
@@ -155,6 +159,10 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field(
                 "continuation_stream_fn",
                 &self.continuation_stream_fn.is_some(),
+            )
+            .field(
+                "cancellable_continuation_stream_fn",
+                &self.cancellable_continuation_stream_fn.is_some(),
             )
             .field(
                 "continuation_extractor",
