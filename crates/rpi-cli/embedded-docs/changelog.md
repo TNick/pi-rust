@@ -11,6 +11,18 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/bigfish1913/pi-rust/compare/v0.7.0...v0.7.1) - 2026-10-21
+
+### Fixed
+
+- *(cli)* reject web startup without its server extension ([#76](https://github.com/bigfish1913/pi-rust/pull/76))
+- keep snapshot benchmark features buildable independently
+
+### Other
+
+- remove redundant provider snapshot conversions
+- add offline provider pipeline allocation benchmark
+
 ## [0.7.0](https://github.com/bigfish1913/pi-rust/compare/v0.6.3...v0.7.0) - 2026-10-21
 
 ### Fixed
