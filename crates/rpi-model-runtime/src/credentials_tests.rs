@@ -3,9 +3,10 @@
 use std::sync::Mutex;
 
 use super::{
-    CredentialRequestSource, CredentialResolutionError, CredentialSource, HostCredentialMaterial,
-    ProtectedCredentialResolver, resolve_credential_protected,
-    resolve_credential_protected_with_policy,
+    resolve_credential_protected, resolve_credential_protected_with_policy,
+    resolve_host_selected_credential_with_policy, CredentialRequestSource,
+    CredentialResolutionError, CredentialSource, HostCredentialMaterial,
+    ProtectedCredentialResolver,
 };
 
 /// Selects the test resolver's response to its first source request.
@@ -52,6 +53,23 @@ impl ProtectedCredentialResolver<&'static str> for TestResolver {
             _ => Ok(None),
         }
     }
+}
+
+/// Queries only the generic host-selected source without provider fallback.
+#[test]
+fn host_selected_resolution_does_not_query_provider_precedence() {
+    let resolver = TestResolver {
+        requests: Mutex::new(Vec::new()),
+        first_action: Action::Missing,
+    };
+
+    let credential = resolve_host_selected_credential_with_policy(false, &resolver).unwrap();
+
+    assert_eq!(credential.source, CredentialSource::Missing);
+    assert_eq!(
+        resolver.requests.lock().unwrap().as_slice(),
+        &[CredentialRequestSource::HostSelected]
+    );
 }
 
 /// Stops source precedence at a host authorization denial.

@@ -14,7 +14,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 fs2 = { workspace = true }
+semver = { workspace = true }
+uuid = { workspace = true }
 rpi-extensions = { workspace = true }
 
 [dev-dependencies]
 tokio-util = { workspace = true }
+tempfile = { workspace = true }

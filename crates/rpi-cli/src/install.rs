@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 
 const INSTALLER_MANIFEST: &str = "rpi-extension-installer";
 const NATIVE_PACKAGES_FILE: &str = "native-packages.json";
-const NATIVE_PACKAGES_LOCK_FILE: &str = "native-packages.lock";
 const CDYLIB_EXTENSION_HINT: &str = "hint: the crate must declare `crate-type = [\"cdylib\"]` and export `rpi_plugin_register` (the unified ABI; legacy `rpi_plugin_register_v2` and `rpi_plugin_register_v3` remain supported for migration)";
 
 /// A Rust-native extension installed through `rpi install`.
@@ -59,21 +58,7 @@ pub(crate) fn should_install_version(
     requested: &str,
     force: bool,
 ) -> Result<bool, String> {
-    let Some(current) = current.filter(|_| !force) else {
-        return Ok(true);
-    };
-    let parse = |version: &str| {
-        semver::Version::parse(version).map_err(|_| {
-            format!("cannot compare version `{version}` for `{name}`; use --force to replace it")
-        })
-    };
-    match parse(requested)?.cmp_precedence(&parse(current)?) {
-        std::cmp::Ordering::Greater => Ok(true),
-        std::cmp::Ordering::Equal => Ok(false),
-        std::cmp::Ordering::Less => Err(format!(
-            "{name} {current} is installed; use --force to downgrade to {requested}"
-        )),
-    }
+    rpi_provider_runtime::native_packages::should_install_version(name, current, requested, force)
 }
 
 pub(crate) fn print_already_installed(name: &str, version: &str) {
@@ -85,59 +70,9 @@ pub(crate) fn print_already_installed(name: &str, version: &str) {
 /// A malformed or unreadable registry is returned as an error, rather than
 /// being conflated with a missing file. Mutation paths use this distinction to
 /// avoid replacing damaged metadata with a newly generated registry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NativePackageRegistry {
-    /// No registry has been created yet.
-    Missing,
-    /// A registry was present and passed JSON/schema validation.
-    Valid(Vec<InstalledNativePackage>),
-}
-
-impl NativePackageRegistry {
-    fn into_records(self) -> Vec<InstalledNativePackage> {
-        match self {
-            Self::Missing => Vec::new(),
-            Self::Valid(records) => records,
-        }
-    }
-}
-
-struct NativePackageMutationLock {
-    file: Option<std::fs::File>,
-}
-
-impl NativePackageMutationLock {
-    fn acquire(metadata_path: &Path) -> Result<Self, String> {
-        let parent = metadata_path
-            .parent()
-            .ok_or_else(|| "native package metadata has no parent".to_string())?;
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        let lock_path = parent.join(NATIVE_PACKAGES_LOCK_FILE);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .map_err(|error| {
-                format!(
-                    "could not open native package lock {}: {error}",
-                    lock_path.display()
-                )
-            })?;
-        fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
-            format!("could not lock native package state (another install may be running): {error}")
-        })?;
-        Ok(Self { file: Some(file) })
-    }
-}
-
-impl Drop for NativePackageMutationLock {
-    fn drop(&mut self) {
-        if let Some(file) = self.file.take() {
-            let _ = fs2::FileExt::unlock(&file);
-        }
-    }
-}
+pub type NativePackageRegistry =
+    rpi_provider_runtime::native_packages::Registry<InstalledNativePackage>;
+type NativePackageMutationLock = rpi_provider_runtime::native_packages::MutationLock;
 
 #[derive(Debug, Clone)]
 struct InstallOptions {
@@ -542,12 +477,7 @@ fn write_native_packages_at(path: &Path, records: &[InstalledNativePackage]) -> 
             Err(error) => return Err(error.to_string()),
         }
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| "native package metadata has no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let data = serde_json::to_vec_pretty(records).map_err(|error| error.to_string())?;
-    std::fs::write(path, data).map_err(|error| error.to_string())
+    rpi_provider_runtime::native_packages::write(path, records)
 }
 
 /// Read and validate the Rust-native extension registry without hiding errors.
@@ -559,18 +489,7 @@ pub fn read_native_package_registry() -> Result<NativePackageRegistry, String> {
 }
 
 fn read_native_package_registry_at(path: &Path) -> Result<NativePackageRegistry, String> {
-    let data = match std::fs::read(path) {
-        Ok(data) => data,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(NativePackageRegistry::Missing)
-        }
-        Err(error) => {
-            return Err(format!("could not read {}: {error}", path.display()));
-        }
-    };
-    serde_json::from_slice(&data)
-        .map(NativePackageRegistry::Valid)
-        .map_err(|error| format!("invalid JSON or schema in {}: {error}", path.display()))
+    rpi_provider_runtime::native_packages::read(path)
 }
 
 /// Read the registry for best-effort discovery and startup update notices.

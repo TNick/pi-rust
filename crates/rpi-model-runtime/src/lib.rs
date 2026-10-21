@@ -5,20 +5,27 @@
 //! conversion are shared by embedded and CLI products.
 
 mod catalog;
+mod credential_store;
 mod credentials;
 mod fingerprint;
 mod live_catalog;
 mod models;
 mod properties;
 mod provider_factory;
+mod provider_rows;
 mod safe_snapshot;
 mod selection;
 
 pub use catalog::{apply_provider_defaults, build_catalog, resolve_provider_headers};
+pub use credential_store::{
+    delete_auth_credential, read_auth_store, upsert_auth_credential, write_auth_store,
+    CredentialStoreError,
+};
 pub use credentials::{
     readiness_from_catalog, resolve_credential_protected, resolve_credential_protected_with_policy,
-    AuthStore, Credential, CredentialRequestSource, CredentialResolutionError, CredentialSource,
-    HostCredentialMaterial, ProtectedCredential, ProtectedCredentialResolver, ResolvedCredential,
+    resolve_host_selected_credential_with_policy, AuthStore, Credential, CredentialRequestSource,
+    CredentialResolutionError, CredentialSource, HostCredentialMaterial, ProtectedCredential,
+    ProtectedCredentialResolver, ResolvedCredential,
 };
 pub use fingerprint::{
     model_configuration_fingerprint, model_execution_fingerprint, ModelConfigurationFingerprint,
@@ -38,6 +45,8 @@ pub use provider_factory::{
     create_builtin_provider, create_builtin_provider_for_api, supports_builtin_provider_api,
     BuiltinProviderError,
 };
+pub use provider_rows::ProviderModelRows;
+pub use provider_rows::{ModelsConfigFile, ModelsConfigFileError};
 pub use safe_snapshot::{
     safe_model_execution_configuration, safe_model_snapshot, SafeModelCompatibility,
     SafeModelExecutionConfiguration, SafeModelSnapshot, SafeSamplingParameters,

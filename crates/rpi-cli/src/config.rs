@@ -39,8 +39,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use rpi_ai::{Api, ModelCost, StreamingProtocolCompat};
-use rpi_model_runtime::ConfigValueResolver;
 pub use rpi_model_runtime::{AuthStore, Credential, ModelDefinition, ModelsConfig, ProviderConfig};
+use rpi_model_runtime::{ConfigValueResolver, ModelsConfigFile, ModelsConfigFileError};
 
 /// The config directory name under the home dir.
 pub const CONFIG_DIR_NAME: &str = ".rpi";
@@ -143,6 +143,7 @@ pub fn trust_path() -> Result<PathBuf, ConfigError> {
     Ok(agent_dir()?.join("trust.json"))
 }
 
+#[cfg(test)]
 fn read_text_with_fallback(
     primary: PathBuf,
     fallback: Option<PathBuf>,
@@ -236,31 +237,21 @@ fn migrate_legacy_layout_in(root: &Path, agent: &Path) -> Result<usize, ConfigEr
 /// JSON ⇒ `ConfigError::Json` (we do not silently swallow a corrupt auth file).
 pub fn read_auth() -> Result<AuthStore, ConfigError> {
     let path = auth_path()?;
-    match read_text_with_fallback(path, None)? {
-        Some((path, text)) => {
-            serde_json::from_str(&text).map_err(|source| ConfigError::Json { path, source })
-        }
-        None => Ok(AuthStore::new()),
-    }
+    rpi_model_runtime::read_auth_store(&path).map_err(map_auth_read_error)
 }
 
 /// Atomically write the whole auth store (ensures the dir exists, writes a
 /// temp sibling, `rename`s over the target, then `chmod 0o600` on Unix).
 pub fn write_auth(store: &AuthStore) -> Result<(), ConfigError> {
     let path = auth_path()?;
-    let dir = agent_dir()?;
-    ensure_dir(&dir)?;
-    let json = serde_json::to_string_pretty(store).unwrap();
-    atomic_write(&path, json.as_bytes())?;
-    set_owner_only(&path);
-    Ok(())
+    rpi_model_runtime::write_auth_store(&path, store).map_err(map_auth_write_error)
 }
 
 /// Read-modify-write: upsert a credential for `provider_id`.
 pub fn upsert_credential(provider_id: &str, cred: Credential) -> Result<(), ConfigError> {
-    let mut store = read_auth()?;
-    store.insert(provider_id.to_string(), cred);
-    write_auth(&store)
+    let path = auth_path()?;
+    rpi_model_runtime::upsert_auth_credential(&path, provider_id, cred)
+        .map_err(map_auth_write_error)
 }
 
 /// Store an OAuth token under exactly one provider id using the atomic auth
@@ -302,12 +293,31 @@ pub fn read_oauth_token(provider_id: &str) -> Result<Option<Credential>, ConfigE
 /// the file when the provider existed (so `auth logout` reflects the new state
 /// on disk even if the map isn't empty).
 pub fn delete_credential(provider_id: &str) -> Result<bool, ConfigError> {
-    let mut store = read_auth()?;
-    if store.remove(provider_id).is_some() {
-        write_auth(&store)?;
-        Ok(true)
-    } else {
-        Ok(false)
+    let path = auth_path()?;
+    rpi_model_runtime::delete_auth_credential(&path, provider_id).map_err(map_auth_write_error)
+}
+
+/// Preserves the CLI config error categories for reusable credential reads.
+fn map_auth_read_error(error: rpi_model_runtime::CredentialStoreError) -> ConfigError {
+    match error {
+        rpi_model_runtime::CredentialStoreError::Io { path, source } => {
+            ConfigError::Read { path, source }
+        }
+        rpi_model_runtime::CredentialStoreError::Json { path, source } => {
+            ConfigError::Json { path, source }
+        }
+    }
+}
+
+/// Preserves the CLI config error categories for reusable credential writes.
+fn map_auth_write_error(error: rpi_model_runtime::CredentialStoreError) -> ConfigError {
+    match error {
+        rpi_model_runtime::CredentialStoreError::Io { path, source } => {
+            ConfigError::Write { path, source }
+        }
+        rpi_model_runtime::CredentialStoreError::Json { path, source } => {
+            ConfigError::Json { path, source }
+        }
     }
 }
 
@@ -318,12 +328,7 @@ pub fn delete_credential(provider_id: &str) -> Result<bool, ConfigError> {
 /// Load `~/.rpi/models.json`. Missing file ⇒ empty config (no error).
 pub fn load_models_config() -> Result<ModelsConfig, ConfigError> {
     let path = models_path()?;
-    match read_text_with_fallback(path, None)? {
-        Some((path, text)) => {
-            parse_models_json(&text).map_err(|source| ConfigError::Json { path, source })
-        }
-        None => Ok(ModelsConfig::default()),
-    }
+    ModelsConfigFile::load(&path).map_err(map_models_config_file_error)
 }
 
 /// Atomically write the whole `~/.rpi/models.json` (used by the interactive
@@ -345,11 +350,16 @@ pub fn save_models_config(cfg: &ModelsConfig) -> Result<(), ConfigError> {
         let backup = dir.join(format!("models.json.bak-{stamp}"));
         let _ = std::fs::write(&backup, existing);
     }
-    let text = serde_json::to_string_pretty(cfg).map_err(|source| ConfigError::Json {
-        path: path.clone(),
-        source,
-    })?;
-    atomic_write(&path, text.as_bytes())
+    ModelsConfigFile::save(&path, cfg).map_err(map_models_config_file_error)
+}
+
+/// Maps reusable model-file errors into the CLI configuration error type.
+fn map_models_config_file_error(error: ModelsConfigFileError) -> ConfigError {
+    match error {
+        ModelsConfigFileError::Read { path, source } => ConfigError::Read { path, source },
+        ModelsConfigFileError::Json { path, source } => ConfigError::Json { path, source },
+        ModelsConfigFileError::Write { path, source } => ConfigError::Write { path, source },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +422,7 @@ pub fn project_trust_decision(cwd: &Path) -> Result<Option<bool>, ConfigError> {
 /// Parse the models JSON, tolerating `//` line comments (a minimal subset of
 /// upstream's `stripJsonComments`). Tries strict JSON first; on failure, strips
 /// `//…` to end-of-line and retries.
+#[cfg(test)]
 fn parse_models_json(text: &str) -> Result<ModelsConfig, serde_json::Error> {
     match serde_json::from_str(text) {
         Ok(c) => Ok(c),
@@ -1094,6 +1105,7 @@ mod tests {
                 input: None,
                 headers: None,
                 compat: None,
+                provider_options_schema: None,
                 provider_options: std::collections::BTreeMap::new(),
             }],
         };
@@ -1301,6 +1313,7 @@ mod tests {
                 input: None,
                 headers: None,
                 compat: None,
+                provider_options_schema: None,
                 provider_options: std::collections::BTreeMap::new(),
             }],
         };

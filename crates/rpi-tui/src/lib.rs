@@ -58,6 +58,7 @@ pub mod text;
 pub mod theme;
 pub mod tool_execution;
 mod tool_panel;
+pub mod tree_list;
 pub mod truncated_text;
 pub mod tui;
 pub mod tui_alt_screen;
@@ -149,6 +150,7 @@ pub use theme::{
     ThemeManager, ThemePreset, ThemeSpacing,
 };
 pub use tool_execution::{ToolExecutionComponent, ToolStatus};
+pub use tree_list::{TreeItem, TreeList, TreeRow};
 pub use truncated_text::TruncatedText;
 pub use tui::{
     OverlayAnchor, OverlayHandle as TuiOverlayHandle, OverlayMargin, OverlayOptions, TuiMode,

@@ -101,3 +101,19 @@ impl ExecutionBinding {
         model
     }
 }
+
+/// Merges request headers into a test-only model snapshot for assertions.
+#[cfg(test)]
+fn merge_auth_headers(model: &mut Model, headers: &BTreeMap<String, String>) {
+    let merged = model.headers.get_or_insert_with(BTreeMap::new);
+    for (name, value) in headers {
+        if let Some((_, old_value)) = merged
+            .iter_mut()
+            .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+        {
+            *old_value = value.clone();
+        } else {
+            merged.insert(name.clone(), value.clone());
+        }
+    }
+}
