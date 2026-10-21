@@ -58,7 +58,7 @@ pub(crate) fn should_install_version(
     requested: &str,
     force: bool,
 ) -> Result<bool, String> {
-    rpi_provider_runtime::native_packages::should_install_version(name, current, requested, force)
+    rpi_extensions::native_packages::should_install_version(name, current, requested, force)
 }
 
 pub(crate) fn print_already_installed(name: &str, version: &str) {
@@ -70,9 +70,8 @@ pub(crate) fn print_already_installed(name: &str, version: &str) {
 /// A malformed or unreadable registry is returned as an error, rather than
 /// being conflated with a missing file. Mutation paths use this distinction to
 /// avoid replacing damaged metadata with a newly generated registry.
-pub type NativePackageRegistry =
-    rpi_provider_runtime::native_packages::Registry<InstalledNativePackage>;
-type NativePackageMutationLock = rpi_provider_runtime::native_packages::MutationLock;
+pub type NativePackageRegistry = rpi_extensions::native_packages::Registry<InstalledNativePackage>;
+type NativePackageMutationLock = rpi_extensions::native_packages::MutationLock;
 
 #[derive(Debug, Clone)]
 struct InstallOptions {
@@ -477,7 +476,7 @@ fn write_native_packages_at(path: &Path, records: &[InstalledNativePackage]) -> 
             Err(error) => return Err(error.to_string()),
         }
     }
-    rpi_provider_runtime::native_packages::write(path, records)
+    rpi_extensions::native_packages::write(path, records)
 }
 
 /// Read and validate the Rust-native extension registry without hiding errors.
@@ -489,7 +488,7 @@ pub fn read_native_package_registry() -> Result<NativePackageRegistry, String> {
 }
 
 fn read_native_package_registry_at(path: &Path) -> Result<NativePackageRegistry, String> {
-    rpi_provider_runtime::native_packages::read(path)
+    rpi_extensions::native_packages::read(path)
 }
 
 /// Read the registry for best-effort discovery and startup update notices.

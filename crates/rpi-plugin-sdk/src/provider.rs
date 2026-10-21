@@ -1,12 +1,16 @@
 //! Provider packages use the same C ABI as tools. This bridge owns a runtime
 //! per request, so no plugin worker thread survives DLL unloading.
+//!
+//! Available with the optional `provider` feature. Use [`crate::export_provider!`]
+//! for single-provider plugins, or [`register`] and [`drive`] when registering
+//! multiple providers through one plugin entrypoint.
+use crate::{
+    PluginApi, ProviderRequestFn, ProviderStreamControl, ProviderStreamEmitFn,
+    ProviderStreamRequestFn, StbString, StbStringRef,
+};
 use rpi_ai::{
     AssistantMessage, AssistantMessageEvent, Context, Model, Provider, SimpleStreamOptions,
     StopReason,
-};
-use rpi_plugin_sdk::{
-    PluginApi, ProviderRequestFn, ProviderStreamControl, ProviderStreamEmitFn,
-    ProviderStreamRequestFn, StbString, StbStringRef,
 };
 use std::{ffi::c_void, sync::Arc, time::Duration};
 
@@ -48,7 +52,7 @@ pub fn register(
             return rc;
         }
     }
-    let free = rpi_plugin_sdk::callbacks::free_string;
+    let free = crate::callbacks::free_string;
     if let Some(register) = api.register_streaming_provider {
         register(
             StbStringRef::from_str(id),
@@ -115,7 +119,7 @@ pub unsafe fn drive(
     control: *const ProviderStreamControl,
     out: *mut StbString,
 ) -> i32 {
-    rpi_plugin_sdk::guard_or(1, || {
+    crate::guard_or(1, || {
         if out.is_null() {
             return 2;
         }
@@ -195,16 +199,20 @@ pub unsafe fn drive(
 }
 
 /// Export a provider package using an ordinary Rust Provider factory.
+///
+/// Requires the `provider` feature. For a multi-provider package, use one
+/// [`crate::export_plugin!`] entrypoint and call [`register`] for each provider
+/// instead of exporting this macro multiple times.
 #[macro_export]
 macro_rules! export_provider {
     ($id:expr, $base:expr, $api:expr, $manifest:expr, $factory:path) => {
         extern "C" fn request(
-            req: rpi_plugin_sdk::StbStringRef,
-            out: *mut rpi_plugin_sdk::StbString,
+            req: $crate::StbStringRef,
+            out: *mut $crate::StbString,
             _: *mut std::ffi::c_void,
         ) -> i32 {
             unsafe {
-                $crate::drive(
+                $crate::provider::drive(
                     $factory,
                     req,
                     None,
@@ -215,18 +223,18 @@ macro_rules! export_provider {
             }
         }
         extern "C" fn stream(
-            req: rpi_plugin_sdk::StbStringRef,
-            emit: Option<rpi_plugin_sdk::ProviderStreamEmitFn>,
+            req: $crate::StbStringRef,
+            emit: Option<$crate::ProviderStreamEmitFn>,
             data: *mut std::ffi::c_void,
-            control: *const rpi_plugin_sdk::ProviderStreamControl,
-            _: Option<rpi_plugin_sdk::ProviderStreamCompletionFn>,
+            control: *const $crate::ProviderStreamControl,
+            _: Option<$crate::ProviderStreamCompletionFn>,
             _: *mut std::ffi::c_void,
-            out: *mut rpi_plugin_sdk::StbString,
+            out: *mut $crate::StbString,
             _: *mut std::ffi::c_void,
         ) -> i32 {
-            unsafe { $crate::drive($factory, req, emit, data, control, out) }
+            unsafe { $crate::provider::drive($factory, req, emit, data, control, out) }
         }
-        rpi_plugin_sdk::export_plugin!(|api| $crate::register(
+        $crate::export_plugin!(|api| $crate::provider::register(
             api, $id, $base, $api, $manifest, request, stream
         ));
     };
@@ -243,10 +251,7 @@ mod tests {
     }
     extern "C" fn collect(raw: StbString, data: *mut c_void) -> i32 {
         let string = unsafe {
-            rpi_plugin_sdk::callbacks::OwnedString::from_raw(
-                raw,
-                Some(rpi_plugin_sdk::callbacks::free_string),
-            )
+            crate::callbacks::OwnedString::from_raw(raw, Some(crate::callbacks::free_string))
         };
         let value = serde_json::from_str(&string.to_string_lossy()).unwrap();
         // The bridge calls emit synchronously on this request thread only.
@@ -274,10 +279,7 @@ mod tests {
         };
         assert_eq!(rc, 0);
         let output = unsafe {
-            rpi_plugin_sdk::callbacks::OwnedString::from_raw(
-                out,
-                Some(rpi_plugin_sdk::callbacks::free_string),
-            )
+            crate::callbacks::OwnedString::from_raw(out, Some(crate::callbacks::free_string))
         };
         let message: AssistantMessage = serde_json::from_str(&output.to_string_lossy()).unwrap();
         assert_eq!(message.stop_reason, StopReason::ToolUse);
@@ -323,10 +325,7 @@ mod tests {
             0
         );
         let output = unsafe {
-            rpi_plugin_sdk::callbacks::OwnedString::from_raw(
-                out,
-                Some(rpi_plugin_sdk::callbacks::free_string),
-            )
+            crate::callbacks::OwnedString::from_raw(out, Some(crate::callbacks::free_string))
         };
         let message: AssistantMessage = serde_json::from_str(&output.to_string_lossy()).unwrap();
         assert_eq!(message.stop_reason, StopReason::Aborted);

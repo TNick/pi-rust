@@ -9,11 +9,11 @@ use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 
+use rpi_extensions::packages::read_project_registry;
+#[cfg(test)]
+use rpi_extensions::packages::write_project_registry;
 pub use rpi_extensions::ProjectPackage;
 use rpi_extensions::ProjectPackageRegistry as PackageRegistry;
-use rpi_provider_runtime::packages::read_project_registry;
-#[cfg(test)]
-use rpi_provider_runtime::packages::write_project_registry;
 
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
@@ -135,12 +135,9 @@ fn link(args: &[String]) -> i32 {
         cargo_package: selected.name,
         artifacts: vec![file],
     };
-    if let Err(e) = rpi_provider_runtime::packages::install_project_artifact(
-        &project_root,
-        package,
-        &artifact,
-        force,
-    ) {
+    if let Err(e) =
+        rpi_extensions::packages::install_project_artifact(&project_root, package, &artifact, force)
+    {
         eprintln!("error: {e}");
         return 1;
     }
@@ -360,7 +357,7 @@ fn unlink(args: &[String]) -> i32 {
             return 1;
         }
     };
-    if let Err(e) = rpi_provider_runtime::packages::uninstall_project_package(&cwd, name) {
+    if let Err(e) = rpi_extensions::packages::uninstall_project_package(&cwd, name) {
         eprintln!("error: {e}");
         return 1;
     }
@@ -534,7 +531,7 @@ fn write_registry(cwd: &Path, r: &PackageRegistry) -> Result<(), String> {
     write_project_registry(cwd, r)
 }
 pub fn project_package_dirs(cwd: &Path, kind: &str) -> Vec<PathBuf> {
-    match rpi_provider_runtime::packages::project_package_resource_dirs(cwd, kind) {
+    match rpi_extensions::packages::project_package_resource_dirs(cwd, kind) {
         Ok(directories) => directories,
         Err(error) => {
             eprintln!("warning: could not load project package registry: {error}");

@@ -2,8 +2,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use crate::{package_resource_dirs, ProjectPackage, ProjectPackageRegistry};
 use fs2::FileExt;
-use rpi_extensions::{package_resource_dirs, ProjectPackage, ProjectPackageRegistry};
 
 const REGISTRY_FILE: &str = "packages.json";
 const LOCK_FILE: &str = "packages.lock";

@@ -7,9 +7,10 @@ The stable `#[repr(C)]` ABI contract for rpi plugins. Depend on this crate, and
 nothing else, to build a Rust `cdylib` that extends the `rpi` agent with tools,
 providers, slash commands, event handlers, renderers and discovered resources.
 
-This crate has **no dependency on the rpi runtime** on purpose. A plugin must
-not link the host — the host links the plugin. Both sides share only the types
-defined here.
+The default SDK has **no dependency on the rpi runtime** on purpose. A plugin
+must not link the host — both sides share only the ABI types defined here.
+The optional `provider` feature adds plugin-side AI helpers, without depending
+on the CLI or host loader.
 
 ## Install
 
@@ -116,6 +117,38 @@ descendants and closing inherited pipes. Its Win32/libc calls and owned handles
 stay in the SDK; packages can enable `forbid(unsafe_code)` while using the
 platform-independent interface.
 
+## Provider plugins
+
+Enable the optional `provider` feature when implementing an `rpi_ai::Provider`:
+
+```toml
+[dependencies]
+rpi-plugin-sdk = { path = "/path/to/pi-rust/crates/rpi-plugin-sdk", features = ["provider"] }
+rpi-ai = { path = "/path/to/pi-rust/crates/rpi-ai", features = ["providers"] }
+serde_json = "1"
+```
+
+Replace the paths with the same compatible core checkout. Released SDK versions
+through 0.6.2 do not include this feature; use the migrated source until a version
+containing it is published.
+
+`provider::completions(model, options, anonymous)` reuses the OpenAI-compatible
+protocol without reading vendor credentials from the process environment.
+`export_provider!` exports a single-provider plugin from a Rust factory. For
+multiple providers, keep one `export_plugin!` entrypoint and use
+`provider::register` and `provider::drive` for each provider instead.
+The bridge forwards streaming events, honors host cancellation and owns a
+per-request runtime, so no worker survives plugin unloading.
+
+The `provider` feature enables `json` and the AI, Tokio and HTTP dependencies.
+It is **off by default**; tool-only plugins retain the lightweight ABI SDK,
+and `default-features = false` still provides the std-only ABI core.
+
+This replaces the former `rpi-provider-runtime` crate. Remove that dependency,
+enable the SDK's `provider` feature, replace `rpi_provider_runtime::` helper
+paths with `rpi_plugin_sdk::provider::`, and invoke the export macro as
+`rpi_plugin_sdk::export_provider!`.
+
 ## Registered TUI text components
 
 Use `RuntimeActionId::UiComponent` (22). Each plugin owns its own component IDs.
@@ -194,8 +227,9 @@ updated to `export_plugin!` and rebuilt with the current SDK.
 
 ## Versioning
 
-A plugin depends on `rpi-plugin-sdk` only, so its version is decoupled from the
-rest of the family. ABI compatibility is checked through `abi_version` and
+A plugin using only the ABI SDK has a version decoupled from the rest of the
+family. The optional `provider` helpers also depend on a compatible `rpi-ai`.
+ABI compatibility is checked through `abi_version` and
 `struct_size`; each optional capability must also be checked before use.
 Rebuild extensions when the SDK contract they require changes.
 

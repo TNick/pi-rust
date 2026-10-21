@@ -19,7 +19,7 @@ by Mario Zechner. It now includes its own Rust-native plugin ABI and execution
 infrastructure. See [Acknowledgements](#acknowledgements) and [NOTICE](NOTICE)
 for upstream attribution.
 
-Website: <https://rpi.laofu.online/> · Docs: <https://rpi.laofu.online/docs.html>
+Website: <https://rpi.bigfisharc.cn/> · Docs: <https://rpi.bigfisharc.cn/docs.html>
 
 ![rpi interactive session](docs/images/rpi-interactive.png)
 
@@ -290,7 +290,7 @@ The host loads project `.rpi/extensions`, then global
 
 Ready-to-install extensions live in the companion
 [`pi-rust/rpi-package`](https://github.com/pi-rust/rpi-package) repository, with
-an [online catalog](https://rpi.laofu.online/packages.html).
+an [online catalog](https://rpi.bigfisharc.cn/packages.html).
 
 ### Web access
 
@@ -364,7 +364,7 @@ machine. See [`docs/remote/user-guide.md`](docs/remote/user-guide.md).
 
 | | |
 | --- | --- |
-| Current release | **[0.6.2](https://github.com/bigfish1913/pi-rust/releases)** (nine crates, published together) |
+| Current release | **[0.7.0](https://github.com/bigfish1913/pi-rust/releases)** (nine crates, published together) |
 | Stability | `rpi-ai`, `rpi-agent`, `rpi-tools`, `rpi-harness`, `rpi-plugin-sdk` are the intended stable surface |
 | MSRV | 1.78 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |

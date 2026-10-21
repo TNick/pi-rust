@@ -69,6 +69,9 @@ use rpi_plugin_sdk::{
 };
 use thiserror::Error;
 
+pub mod native_packages;
+pub mod packages;
+
 pub use actions::{
     reload_callback_from_mailbox, trampoline_runtime_action, ActionBridge, ReloadMailbox,
     RuntimeActionHost, SideQuestionSink, UiDialogMailbox, UiDialogRequest,

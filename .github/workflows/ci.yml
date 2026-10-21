@@ -89,6 +89,9 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace --locked
 
+      - name: Test the optional provider SDK bridge
+        run: cargo test -p rpi-plugin-sdk --features provider --locked
+
       - name: Test prebuilt release manifests
         run: python3 scripts/test_prebuilt_release.py
 

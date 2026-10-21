@@ -6,8 +6,9 @@
 新增接入遵循 [Provider 接入规范](../extensions/provider-integration.md)。
 
 核心保留 Anthropic Messages、OpenAI Chat Completions / Responses，以及离线测试用的 Faux。
-CLI 不依赖供应商实现。`rpi-provider-runtime` 留在核心仓库作为通用 ABI / 异步协议桥接库，
-不会登记供应商或解析宿主凭据。
+CLI 不依赖供应商实现。通用 ABI / 异步协议桥接由核心仓库的
+`rpi-plugin-sdk::provider` 提供，只有显式开启 SDK 的 `provider` feature 才会引入
+AI、Tokio 与 HTTP 依赖；默认 ABI SDK 保持轻量。桥接层不内置供应商，也不解析宿主凭据。
 
 ## 统一包中的 provider
 
