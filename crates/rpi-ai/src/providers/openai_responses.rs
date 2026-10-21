@@ -251,19 +251,6 @@ impl Provider for OpenAiResponsesProvider {
                         "provider continuation state is invalid",
                     );
                 };
-                if !ctx.messages.iter().any(|message| {
-                    matches!(message, Message::Assistant(assistant)
-                        if assistant.response_id.as_deref() == Some(response_id.as_str())
-                            && assistant.provider == self.id
-                            && assistant.model == model.id
-                            && assistant.api == model.api)
-                }) {
-                    return crate::provider::continuation_error_stream(
-                        model,
-                        self.id(),
-                        "provider continuation is not present in the current context",
-                    );
-                }
                 Some(response_id)
             }
             None => None,

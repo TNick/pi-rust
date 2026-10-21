@@ -23,7 +23,9 @@ use tokio_util::sync::CancellationToken;
 /// in-memory only: it has no `Serialize` implementation and its `Debug`
 /// representation redacts the state. Providers should store only a minimal
 /// opaque continuation reference here. Do not store request/response wire
-/// payloads, credentials, or secrets in the state.
+/// payloads, credentials, or secrets in the state. The host owns lineage
+/// validation: it must only reuse a handle when the current context belongs to
+/// the same logical conversation or branch that produced it.
 #[derive(Clone)]
 pub struct ProviderContinuation {
     provider_id: String,
@@ -594,7 +596,9 @@ pub trait Provider: Send + Sync {
     /// `callback`. Calling this method with `None` opts in to any provider-side
     /// response retention required for a later continuation. The default fails
     /// closed so continuation cannot bypass auth or reporting by falling back
-    /// to the legacy continuation method.
+    /// to the legacy continuation method. Hosts are responsible for validating
+    /// that a supplied handle's conversation lineage matches `ctx`; provider
+    /// and model scope alone cannot establish that relationship.
     ///
     /// # Parameters
     /// - `model`: Model that must match the continuation scope.
