@@ -16,7 +16,10 @@ mod provider_rows;
 mod safe_snapshot;
 mod selection;
 
-pub use catalog::{apply_provider_defaults, build_catalog, resolve_provider_headers};
+pub use catalog::{
+    apply_provider_defaults, build_catalog, resolve_model_endpoints, resolve_provider_headers,
+    ModelEndpointResolutionError,
+};
 pub use credential_store::{
     delete_auth_credential, read_auth_store, upsert_auth_credential, write_auth_store,
     CredentialStoreError,

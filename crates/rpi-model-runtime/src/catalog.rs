@@ -2,12 +2,58 @@
 
 use std::collections::BTreeMap;
 
-use rpi_ai::Model;
 use rpi_ai::providers::anthropic::models::anthropic_models;
 use rpi_ai::providers::openai_responses::openai_responses_models;
+use rpi_ai::Model;
 use rpi_extensions::ProviderManifest;
 
-use crate::models::{ConfigValueResolver, ModelsConfig, ProviderConfig, provider_to_models};
+use crate::models::{provider_to_models, ConfigValueResolver, ModelsConfig, ProviderConfig};
+
+/// A configured provider or model endpoint could not be resolved by the host.
+#[derive(Debug, thiserror::Error)]
+pub enum ModelEndpointResolutionError {
+    /// The host resolver did not provide a configured endpoint value.
+    #[error("configured model endpoint could not be resolved")]
+    Unresolved,
+}
+
+/// Resolves configured provider and model endpoint expressions in a catalog.
+///
+/// Model-level endpoint configuration takes precedence over provider-level
+/// configuration. Models without either override retain their endpoint from
+/// catalog construction.
+///
+/// # Parameters
+/// - `models`: Catalog models that will be selected and passed to providers.
+/// - `config`: Host-loaded model configuration for the same catalog snapshot.
+/// - `resolver`: Host-owned expression resolver.
+///
+/// # Errors
+/// Returns an error when a configured endpoint cannot be resolved.
+pub fn resolve_model_endpoints(
+    models: &mut [Model],
+    config: &ModelsConfig,
+    resolver: &dyn ConfigValueResolver,
+) -> Result<(), ModelEndpointResolutionError> {
+    for model in models {
+        let Some(provider) = config.providers.get(&model.provider) else {
+            continue;
+        };
+        let configured_endpoint = provider
+            .models
+            .iter()
+            .find(|definition| definition.id == model.id)
+            .and_then(|definition| definition.base_url.as_deref())
+            .or(provider.base_url.as_deref());
+        if let Some(endpoint) = configured_endpoint {
+            model.base_url = resolver
+                .resolve(endpoint, None)
+                .ok_or(ModelEndpointResolutionError::Unresolved)?;
+        }
+    }
+    Ok(())
+}
+
 /// Builds the model catalog from built-in providers, package manifests, and
 /// host configuration while applying package defaults in place.
 ///
