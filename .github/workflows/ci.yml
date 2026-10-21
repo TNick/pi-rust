@@ -56,6 +56,9 @@ jobs:
       - name: Check workspace targets without warnings
         run: cargo check --workspace --all-targets --locked
 
+      - name: Check all extension features and test targets
+        run: cargo check -p rpi-extensions --all-features --tests --locked
+
   test:
     name: Cargo test
     runs-on: ubuntu-latest
@@ -91,6 +94,14 @@ jobs:
 
       - name: Test the optional provider SDK bridge
         run: cargo test -p rpi-plugin-sdk --features provider --locked
+
+      - name: Exercise the real plugin shared library
+        run: |
+          cargo build -p plugin-stub --locked
+          cargo test -p rpi-extensions --features provider-performance --test plugin_stub_smoke --locked
+
+      - name: Check the standalone ABI core
+        run: cargo check -p rpi-plugin-sdk --no-default-features --locked
 
       - name: Test prebuilt release manifests
         run: python3 scripts/test_prebuilt_release.py

@@ -14,9 +14,6 @@ use rpi_ai::{
 };
 use std::{ffi::c_void, sync::Arc, time::Duration};
 
-pub mod native_packages;
-pub mod packages;
-
 pub type Factory = fn(&Model, &SimpleStreamOptions) -> Arc<dyn Provider>;
 
 /// Reuse the maintained OpenAI-compatible protocol without importing any
@@ -161,10 +158,9 @@ pub unsafe fn drive(
                             AssistantMessageEvent::Error { error, .. } => break error.clone(),
                             _ => {},
                         }
+                        partial = event.partial().clone();
+                        let Some(emit) = emit else { continue; };
                         let mut chunk = serde_json::to_value(&event).expect("provider event JSON");
-                        if let Some(value) = chunk.get("partial") {
-                            if let Ok(message) = serde_json::from_value(value.clone()) { partial = message; }
-                        }
                         // The SDK uses flat tool-call identity fields.
                         let tool = chunk.get("toolCall").cloned().or_else(|| {
                             if event.type_tag() != "toolcall_start" { return None; }
@@ -176,12 +172,10 @@ pub unsafe fn drive(
                                 if let Some(value) = tool.get(field) { chunk[field] = value.clone(); }
                             }
                         }
-                        if let Some(emit) = emit {
-                            if emit(StbString::from_string(chunk.to_string()), emit_data) != 0 {
-                                options.signal.cancel();
-                                partial.stop_reason = StopReason::Aborted;
-                                break partial;
-                            }
+                        if emit(StbString::from_string(chunk.to_string()), emit_data) != 0 {
+                            options.signal.cancel();
+                            partial.stop_reason = StopReason::Aborted;
+                            break partial;
                         }
                     }
                 }
@@ -239,6 +233,9 @@ macro_rules! export_provider {
         ));
     };
 }
+
+#[cfg(test)]
+mod bridge_tests;
 
 #[cfg(test)]
 mod tests {

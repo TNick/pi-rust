@@ -1,0 +1,139 @@
+use super::*;
+use rpi_ai::providers::faux::{FauxProvider, FauxScript, FauxStep};
+
+fn fixture(_: &Model, _: &SimpleStreamOptions) -> Arc<dyn Provider> {
+    let mut message = AssistantMessage::empty(rpi_ai::Api::Faux, "faux", "m", 42);
+    message.content = vec![
+        rpi_ai::Content::thinking("hmm"),
+        rpi_ai::Content::text("hi"),
+        rpi_ai::Content::tool_call("c1", "echo", serde_json::json!({})),
+    ];
+    message.stop_reason = StopReason::ToolUse;
+    let script = FauxScript::new();
+    script.set_responses(vec![FauxStep::Message(message)]);
+    FauxProvider::new(script)
+}
+
+fn request() -> String {
+    serde_json::json!({"model":Model::new("m","M",rpi_ai::Api::Faux,"faux","http://localhost"),
+        "context":Context::new(vec![]),"options":{}})
+    .to_string()
+}
+
+struct Collector {
+    frames: Vec<String>,
+    limit: usize,
+    reject: bool,
+}
+extern "C" fn collect(raw: StbString, data: *mut c_void) -> i32 {
+    let owned = unsafe {
+        crate::callbacks::OwnedString::from_raw(raw, Some(crate::callbacks::free_string))
+    };
+    let state = unsafe { &mut *data.cast::<Collector>() };
+    state.frames.push(owned.to_string_lossy());
+    i32::from(state.reject && state.frames.len() == state.limit)
+}
+extern "C" fn cancelled(data: *mut c_void, _: u32) -> i32 {
+    let state = unsafe { &*data.cast::<Collector>() };
+    i32::from(state.frames.len() == state.limit)
+}
+
+fn run(state: &mut Collector, emit: bool, cancel: bool) -> AssistantMessage {
+    let data = (state as *mut Collector).cast();
+    let control = ProviderStreamControl {
+        is_cancelled: cancelled,
+        wait_cancelled_ms: cancelled,
+        user_data: data,
+    };
+    let mut out = StbString::empty();
+    assert_eq!(
+        unsafe {
+            drive(
+                fixture,
+                StbStringRef::from_str(&request()),
+                emit.then_some(collect),
+                data,
+                if cancel { &control } else { std::ptr::null() },
+                &mut out,
+            )
+        },
+        0
+    );
+    let owned = unsafe {
+        crate::callbacks::OwnedString::from_raw(out, Some(crate::callbacks::free_string))
+    };
+    serde_json::from_str(&owned.to_string_lossy()).unwrap()
+}
+
+#[test]
+fn bytes_and_partial_results_match_the_legacy_conversion_for_every_event_family() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let events = runtime.block_on(async {
+        let request: Request = serde_json::from_str(&request()).unwrap();
+        let mut stream = fixture(&request.model, &SimpleStreamOptions::default())
+            .stream_simple(
+                &request.model,
+                &request.context,
+                &SimpleStreamOptions::default(),
+            )
+            .await;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            if !event.is_terminal() {
+                events.push(event);
+            }
+        }
+        events
+    });
+    let legacy: Vec<String> = events
+        .iter()
+        .map(|event| {
+            let mut chunk = serde_json::to_value(event).unwrap();
+            let tool = chunk.get("toolCall").cloned().or_else(|| {
+                if event.type_tag() != "toolcall_start" {
+                    return None;
+                }
+                let index = chunk["contentIndex"].as_u64()? as usize;
+                chunk.get("partial")?.get("content")?.get(index).cloned()
+            });
+            if let Some(tool) = tool {
+                for field in ["id", "name", "arguments"] {
+                    if let Some(value) = tool.get(field) {
+                        chunk[field] = value.clone();
+                    }
+                }
+            }
+            chunk.to_string()
+        })
+        .collect();
+    let mut state = Collector {
+        frames: vec![],
+        limit: usize::MAX,
+        reject: false,
+    };
+    let complete = run(&mut state, true, false);
+    assert_eq!(state.frames, legacy);
+    state.frames.clear();
+    assert_eq!(run(&mut state, false, false), complete);
+    assert!(state.frames.is_empty());
+    for prefix in 1..=events.len() {
+        for reject in [true, false] {
+            let mut state = Collector {
+                frames: vec![],
+                limit: prefix,
+                reject,
+            };
+            let actual = run(&mut state, true, !reject);
+            let mut expected = events[prefix - 1].partial().clone();
+            expected.stop_reason = StopReason::Aborted;
+            if !reject {
+                expected.error_message = Some("provider request was cancelled".into());
+            }
+            assert_eq!(actual, expected, "prefix {prefix}, rejection {reject}");
+            assert_eq!(state.frames, legacy[..prefix]);
+        }
+    }
+}

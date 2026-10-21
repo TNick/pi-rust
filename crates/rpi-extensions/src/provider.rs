@@ -58,6 +58,8 @@ use crate::PluginKeepalive;
 
 #[cfg(test)]
 mod lifetime_tests;
+#[cfg(all(test, feature = "provider-performance"))]
+mod performance;
 #[cfg(test)]
 mod stream_tests;
 
@@ -1775,12 +1777,8 @@ impl StreamMapper {
 
     /// A supplied delta snapshot already includes that delta. Replace the
     /// accumulator without appending the same text/arguments a second time.
-    fn apply_partial(&mut self, chunk: &serde_json::Value) -> bool {
-        match chunk
-            .get("partial")
-            .cloned()
-            .map(serde_json::from_value::<AssistantMessage>)
-        {
+    fn apply_partial(&mut self, partial: Option<serde_json::Value>) -> bool {
+        match partial.map(serde_json::from_value::<AssistantMessage>) {
             Some(Ok(message)) => {
                 self.output = message;
                 true
@@ -1802,7 +1800,7 @@ impl StreamMapper {
             return None;
         }
         let mut chunk = chunk;
-        let kind = chunk.get("type").and_then(serde_json::Value::as_str)?;
+        chunk.get("type").and_then(serde_json::Value::as_str)?;
 
         // A chunk that opens or continues a block implies the stream is open.
         // `Start` is emitted first so the consumer's `MessageStart` never lands
@@ -1817,6 +1815,9 @@ impl StreamMapper {
             });
         }
 
+        // Extract only after deferral: the parked frame must keep its snapshot.
+        let partial = chunk.as_object_mut()?.remove("partial");
+        let kind = chunk.get("type").and_then(serde_json::Value::as_str)?;
         match kind {
             // `start` is not an event of its own: the host emits `Start` above
             // the first time it sees *any* chunk, so a duplicate is dropped.
@@ -1845,7 +1846,7 @@ impl StreamMapper {
             "text_delta" => {
                 let index = self.content_index(&chunk);
                 let delta = chunk_string(&chunk, "delta");
-                if !self.apply_partial(&chunk) {
+                if !self.apply_partial(partial) {
                     let block = self.ensure_text_block(index);
                     block.text.push_str(&delta);
                 }
@@ -1881,7 +1882,7 @@ impl StreamMapper {
             "thinking_delta" => {
                 let index = self.content_index(&chunk);
                 let delta = chunk_string(&chunk, "delta");
-                if !self.apply_partial(&chunk) {
+                if !self.apply_partial(partial) {
                     let block = self.ensure_thinking_block(index);
                     block.thinking.push_str(&delta);
                 }
@@ -1939,7 +1940,7 @@ impl StreamMapper {
                 // Re-parse on every delta so the partial message renders live
                 // arguments (the same invariant the Anthropic mapper holds).
                 let parsed = rpi_ai::json_parse::parse_streaming_json(Some(accumulated));
-                if !self.apply_partial(&chunk) {
+                if !self.apply_partial(partial) {
                     match self.output.content.get_mut(index) {
                         Some(Content::ToolCall(call)) => call.arguments = parsed,
                         _ => {

@@ -216,3 +216,32 @@ fn malformed_snapshots_fall_back_to_delta_accumulation() {
     );
     assert_eq!(mapper.accumulated().content, vec![Content::text("hello")]);
 }
+
+#[test]
+fn deferred_delta_preserves_the_complete_snapshot() {
+    let mut mapper = StreamMapper::new(Api::Faux, "probe".into(), "m".into());
+    let partial = snapshot(serde_json::json!({"type":"text","text":"override"}));
+    let chunk =
+        serde_json::json!({"type":"text_delta","contentIndex":0,"delta":"x","partial":partial});
+    assert_eq!(mapper.apply(chunk.clone()).unwrap().type_tag(), "start");
+    let deferred = mapper.take_deferred().unwrap();
+    assert_eq!(deferred, chunk);
+    mapper.apply(deferred);
+    assert_eq!(
+        mapper.accumulated().content,
+        vec![Content::text("override")]
+    );
+}
+
+#[test]
+fn null_snapshot_is_malformed_and_absent_snapshot_uses_the_delta() {
+    let mut mapper = mapper();
+    for partial in [None, Some(serde_json::Value::Null)] {
+        let mut chunk = serde_json::json!({"type":"text_delta","contentIndex":0,"delta":"x"});
+        if let Some(partial) = partial {
+            chunk["partial"] = partial;
+        }
+        mapper.apply(chunk);
+    }
+    assert_eq!(mapper.accumulated().content, vec![Content::text("xx")]);
+}
