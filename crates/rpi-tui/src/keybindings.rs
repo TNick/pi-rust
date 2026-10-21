@@ -105,11 +105,36 @@ impl KeyCombo {
 }
 
 /// Keybinding definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingDefinition {
     pub default_keys: Vec<KeyCombo>,
     pub description: Option<&'static str>,
 }
+
+/// Error returned when an application binding ID conflicts with another
+/// definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeybindingRegistrationError {
+    /// Binding identifier already assigned to a different definition.
+    pub id: KeybindingId,
+}
+
+impl std::fmt::Display for KeybindingRegistrationError {
+    /// Formats the duplicate binding identifier.
+    ///
+    /// - `formatter`: Destination for the formatted error.
+    ///
+    /// Formatting result.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "keybinding ID is already registered: {}",
+            self.id
+        )
+    }
+}
+
+impl std::error::Error for KeybindingRegistrationError {}
 
 /// Keybinding conflict.
 #[derive(Debug, Clone)]
@@ -713,6 +738,18 @@ impl Keybindings {
         self.definitions.get(binding_id)
     }
 
+    /// Iterates over registered IDs and their definitions.
+    ///
+    /// The iteration order is unspecified.
+    ///
+    /// # Returns
+    /// Registered keybinding IDs and definitions.
+    pub fn iter(&self) -> impl Iterator<Item = (KeybindingId, &KeybindingDefinition)> {
+        self.definitions
+            .iter()
+            .map(|(id, definition)| (*id, definition))
+    }
+
     /// Get conflicts.
     pub fn get_conflicts(&self) -> &[KeybindingConflict] {
         &self.conflicts
@@ -762,6 +799,35 @@ impl Keybindings {
     pub fn set(&mut self, binding_id: KeybindingId, combos: Vec<KeyCombo>) {
         self.user_bindings.insert(binding_id, combos);
         self.rebuild();
+    }
+
+    /// Registers an application-defined keybinding.
+    ///
+    /// A matching existing definition is accepted so applications can
+    /// initialize the shared manager more than once. Any user override already
+    /// stored for `binding_id` is retained and becomes active after
+    /// registration.
+    ///
+    /// # Parameters
+    /// - `binding_id`: Stable, application-namespaced binding identifier.
+    /// - `definition`: Default keys and description for the new binding.
+    ///
+    /// # Errors
+    /// Returns an error when `binding_id` already names a different definition.
+    pub fn register(
+        &mut self,
+        binding_id: KeybindingId,
+        definition: KeybindingDefinition,
+    ) -> Result<(), KeybindingRegistrationError> {
+        if let Some(existing) = self.definitions.get(binding_id) {
+            if existing == &definition {
+                return Ok(());
+            }
+            return Err(KeybindingRegistrationError { id: binding_id });
+        }
+        self.definitions.insert(binding_id, definition);
+        self.rebuild();
+        Ok(())
     }
 }
 

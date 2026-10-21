@@ -100,7 +100,7 @@ pub use keybinding_hints::{
 };
 pub use keybindings::{
     get_keybindings, set_keybindings, KeyCombo, KeybindingConflict, KeybindingDefinition,
-    KeybindingId, Keybindings,
+    KeybindingId, KeybindingRegistrationError, Keybindings,
 };
 pub use keys::{
     is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key,
