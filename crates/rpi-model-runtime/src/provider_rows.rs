@@ -59,6 +59,24 @@ impl ModelCatalog {
         &self,
         providers: impl IntoIterator<Item = ProviderModelRows>,
     ) -> u64 {
+        self.reconcile_provider_rows_snapshot(providers).revision
+    }
+
+    /// Reconciles provider rows and returns the exact published snapshot.
+    ///
+    /// Configured rows replace each provider's baseline. Providers with no
+    /// configured rows use their baseline, and empty results are omitted. The
+    /// returned snapshot is captured atomically with the published update.
+    ///
+    /// # Parameters
+    /// - `providers`: Provider sources in desired catalog order.
+    ///
+    /// # Returns
+    /// The exact coherent catalog snapshot committed by this reconciliation.
+    pub fn reconcile_provider_rows_snapshot(
+        &self,
+        providers: impl IntoIterator<Item = ProviderModelRows>,
+    ) -> crate::ModelCatalogSnapshot {
         let mut ordered = IndexMap::new();
         for provider in providers {
             let models = provider
@@ -68,7 +86,7 @@ impl ModelCatalog {
                 ordered.insert(provider.provider_id, models);
             }
         }
-        self.reconcile_ordered_providers(ordered)
+        self.reconcile_ordered_providers_snapshot(ordered)
     }
 }
 
@@ -332,15 +350,16 @@ mod tests {
 
     /// Reconciles provider rows in one catalog revision and event.
     #[test]
-    fn provider_row_reconciliation_publishes_one_update() {
+    fn provider_row_reconciliation_returns_published_snapshot() {
         let catalog = ModelCatalog::new();
         let mut events = catalog.subscribe();
-        let revision = catalog.reconcile_provider_rows([
+        let snapshot = catalog.reconcile_provider_rows_snapshot([
             ProviderModelRows::new("first", vec![model("first", "a")], None),
             ProviderModelRows::new("second", vec![model("second", "b")], None),
         ]);
         let event = events.try_recv().expect("one catalog update");
-        assert_eq!(revision, event.revision);
+        assert_eq!(snapshot, catalog.snapshot());
+        assert_eq!(snapshot.revision, event.revision);
         assert_eq!(event.provider_ids, ["first", "second"]);
         assert!(events.try_recv().is_err());
     }
