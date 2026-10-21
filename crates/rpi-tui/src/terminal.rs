@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyEvent, MouseEvent},
+    event::{self, Event, KeyEvent, KeyEventKind, MouseEvent},
     terminal as cterm,
 };
 use thiserror::Error;
@@ -423,6 +423,7 @@ impl Terminal for ProcessTerminal {
                     Ok(true) => {
                         if let Ok(event) = event::read() {
                             match event {
+                                Event::Key(key) if key.kind == KeyEventKind::Release => {}
                                 Event::Key(key) => on_input(InputEvent::Key(
                                     normalize_key_event_with_protocol(key, supports_kitty_keyboard),
                                 )),
