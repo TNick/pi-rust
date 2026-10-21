@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use rpi_ai::{validate_json_value, AiError, Api, Model};
+use rpi_ai::{AiError, Api, Model, validate_json_value};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
@@ -46,6 +46,83 @@ pub struct ModelPropertyDescriptor {
     pub default: Option<Value>,
     /// Whether the property is required by the enclosing object schema.
     pub required: bool,
+}
+
+impl ModelPropertyDescriptor {
+    /// Reports whether a property is safe for a generic settings editor.
+    ///
+    /// Secret-like keys, write-only schemas, read-only schemas, and schemas
+    /// with opaque composite values are excluded from generic editing.
+    ///
+    /// # Returns
+    /// `true` when the property can be displayed and edited generically.
+    pub fn is_safe_for_generic_editor(&self) -> bool {
+        let key = self.key.to_ascii_lowercase();
+        !key_is_sensitive(&key)
+            && !schema_is_sensitive_or_read_only(&self.schema)
+            && !matches!(
+                self.schema.get("type").and_then(Value::as_str),
+                Some("object" | "array")
+            )
+            && !self.value.as_ref().is_some_and(is_composite)
+            && !self.default.as_ref().is_some_and(is_composite)
+    }
+}
+
+/// Detects secret-like provider-defined property names.
+fn key_is_sensitive(key: &str) -> bool {
+    [
+        "secret",
+        "password",
+        "token",
+        "credential",
+        "api_key",
+        "apikey",
+        "authorization",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
+}
+
+/// Detects sensitive or read-only markers throughout a property schema.
+fn schema_is_sensitive_or_read_only(schema: &Value) -> bool {
+    schema
+        .get("writeOnly")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || schema
+            .get("readOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || schema
+            .get("x-sensitive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || schema
+            .get("format")
+            .and_then(Value::as_str)
+            .is_some_and(|format| format.eq_ignore_ascii_case("password"))
+        || schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| {
+                properties.iter().any(|(key, child)| {
+                    key_is_sensitive(&key.to_ascii_lowercase())
+                        || schema_is_sensitive_or_read_only(child)
+                })
+            })
+        || ["items", "allOf", "anyOf", "oneOf"]
+            .iter()
+            .filter_map(|key| schema.get(key))
+            .any(|nested| match nested {
+                Value::Array(items) => items.iter().any(schema_is_sensitive_or_read_only),
+                value => schema_is_sensitive_or_read_only(value),
+            })
+}
+
+/// Reports whether a configured value is composite.
+fn is_composite(value: &Value) -> bool {
+    value.is_object() || value.is_array()
 }
 
 /// Lists schema-backed settings without exposing unrecognized model fields.
