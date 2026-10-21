@@ -121,12 +121,12 @@ pub use loader::{
 pub use markdown::{Markdown, MarkdownOptions};
 pub use mermaid::Mermaid;
 pub use overlay::{Dialog, OverlayHandle, OverlayManager, Selector, SelectorItem};
-pub use property_editor::{PropertyEditor, PropertyEditorItem};
+pub use property_editor::{PropertyEditor, PropertyEditorChoice, PropertyEditorItem};
 pub use scroll_view::{FollowMode, ScrollView, ScrollViewOptions};
 pub use search_bar::SearchBar;
 pub use searchable_select::SearchableSelectList;
 pub use select_list::{SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme};
-pub use settings_list::{SettingItem, SettingType, SettingsList, SettingsListTheme};
+pub use settings_list::{SettingChoice, SettingItem, SettingType, SettingsList, SettingsListTheme};
 pub use spacer::Spacer;
 pub use status_indicator::{CompactionReason, IdleStatus, StatusIndicator, StatusKind};
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};

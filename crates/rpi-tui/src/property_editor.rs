@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::component::Component;
-use crate::settings_list::{SettingItem, SettingsList};
+use crate::settings_list::{SettingChoice, SettingItem, SettingsList};
 use crate::terminal::InputEvent;
 
 /// A schema-neutral setting row for a host-provided property.
@@ -25,7 +25,18 @@ pub struct PropertyEditorItem {
     /// Optional help text.
     pub description: Option<String>,
     /// Allowed values for a finite selector; empty values open an edit action.
-    pub choices: Vec<String>,
+    pub choices: Vec<PropertyEditorChoice>,
+    /// Opaque value matching one finite choice, when applicable.
+    pub selected_choice: Option<String>,
+}
+
+/// One finite choice with a display label and opaque host value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyEditorChoice {
+    /// Text displayed in the selector.
+    pub label: String,
+    /// Opaque value sent back to the host callback.
+    pub value: String,
 }
 
 /// Reusable settings-list surface for editing host-provided properties.
@@ -108,15 +119,23 @@ impl Component for PropertyEditor {
 
 /// Converts a host row into the shared settings-list representation.
 fn to_setting_item(item: PropertyEditorItem) -> SettingItem {
-    let mut row = SettingItem::new(&item.key, &item.label, &item.value);
+    let current = item.selected_choice.as_deref().unwrap_or(&item.value);
+    let mut row = SettingItem::new(&item.key, &item.label, current);
     if let Some(description) = item.description {
         row = row.with_description(&description);
     }
     if item.choices.is_empty() {
         row.with_submenu()
     } else {
-        let choices = item.choices.iter().map(String::as_str).collect::<Vec<_>>();
-        row.with_values(&choices)
+        let choices = item
+            .choices
+            .into_iter()
+            .map(|choice| SettingChoice {
+                label: choice.label,
+                value: choice.value,
+            })
+            .collect::<Vec<_>>();
+        row.with_choices(&choices)
     }
 }
 
@@ -130,9 +149,13 @@ mod tests {
         let editor = PropertyEditor::new(vec![PropertyEditorItem {
             key: "mode".into(),
             label: "Mode".into(),
-            value: "fast".into(),
+            value: "Fast".into(),
             description: None,
-            choices: vec!["fast".into(), "safe".into()],
+            choices: vec![
+                PropertyEditorChoice { label: "Fast".into(), value: "fast".into() },
+                PropertyEditorChoice { label: "Safe".into(), value: "safe".into() },
+            ],
+            selected_choice: Some("fast".into()),
         }]);
         let observed = Arc::new(Mutex::new(None));
         let observed_cb = observed.clone();
@@ -147,6 +170,41 @@ mod tests {
             *observed.lock().unwrap(),
             Some(("mode".into(), "safe".into()))
         );
+        assert!(editor.render(80).iter().any(|line| line.contains("Safe")));
+    }
+
+    #[test]
+    fn typed_enum_values_keep_distinct_labels_and_payloads() {
+        let editor = PropertyEditor::new(vec![PropertyEditorItem {
+            key: "enabled".into(),
+            label: "Enabled".into(),
+            value: "String true".into(),
+            description: None,
+            choices: vec![
+                PropertyEditorChoice {
+                    label: "String true".into(),
+                    value: "\"true\"".into(),
+                },
+                PropertyEditorChoice {
+                    label: "Boolean true".into(),
+                    value: "true".into(),
+                },
+            ],
+            selected_choice: Some("\"true\"".into()),
+        }]);
+        let observed = Arc::new(Mutex::new(None));
+        let observed_cb = observed.clone();
+        editor.on_change(Arc::new(move |key, value| {
+            *observed_cb.lock().unwrap() = Some((key.to_owned(), value.to_owned()));
+        }));
+
+        editor.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some(("enabled".into(), "true".into()))
+        );
+        assert!(editor.render(80).iter().any(|line| line.contains("Boolean true")));
     }
 
     #[test]
@@ -157,6 +215,7 @@ mod tests {
             value: "".into(),
             description: Some("Provider-specific endpoint".into()),
             choices: Vec::new(),
+            selected_choice: None,
         }]);
         let edited = Arc::new(Mutex::new(None));
         let edited_cb = edited.clone();

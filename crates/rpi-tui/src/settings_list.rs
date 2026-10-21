@@ -30,6 +30,8 @@ pub struct SettingItem {
     /// Values cycled through by [`SettingsList::activate`]. Empty for submenu
     /// triggers and read-only rows.
     pub values: Vec<String>,
+    /// Display labels corresponding to values, when they differ from values.
+    pub choice_labels: Vec<String>,
     /// Whether activating the row should call `on_select` (open a submenu)
     /// rather than cycle `values`.
     pub has_submenu: bool,
@@ -45,6 +47,7 @@ impl SettingItem {
             description: None,
             setting_type: SettingType::String,
             values: Vec::new(),
+            choice_labels: Vec::new(),
             has_submenu: false,
         }
     }
@@ -66,6 +69,14 @@ impl SettingItem {
     /// read-only display.
     pub fn with_values(mut self, values: &[&str]) -> Self {
         self.values = values.iter().map(|v| v.to_string()).collect();
+        self.choice_labels = self.values.clone();
+        self
+    }
+
+    /// Set value and visible label pairs for a finite selector.
+    pub fn with_choices(mut self, choices: &[SettingChoice]) -> Self {
+        self.values = choices.iter().map(|choice| choice.value.clone()).collect();
+        self.choice_labels = choices.iter().map(|choice| choice.label.clone()).collect();
         self
     }
 
@@ -75,6 +86,15 @@ impl SettingItem {
         self.has_submenu = true;
         self
     }
+}
+
+/// One opaque selector value and its user-facing label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingChoice {
+    /// Value returned to the host callback.
+    pub value: String,
+    /// Text displayed in the settings list.
+    pub label: String,
 }
 
 /// Setting type.
@@ -383,7 +403,13 @@ impl SettingsList {
         let value_width = 15;
 
         let key_display = truncate_to_width(&item.label, key_width, "");
-        let value_display = truncate_to_width(&item.value, value_width, "");
+        let value_label = item
+            .values
+            .iter()
+            .position(|value| value == &item.value)
+            .and_then(|index| item.choice_labels.get(index))
+            .unwrap_or(&item.value);
+        let value_display = truncate_to_width(value_label, value_width, "");
 
         let main_line = if is_selected {
             format!(
