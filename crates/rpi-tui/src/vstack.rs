@@ -176,6 +176,7 @@ pub enum StackAlign {
 #[derive(Clone)]
 pub struct VStack {
     children: Arc<Mutex<Vec<StackEntry>>>,
+    focused_child: Arc<Mutex<Option<Arc<dyn Component>>>>,
     options: StackOptions,
 }
 
@@ -184,6 +185,7 @@ impl VStack {
     pub fn new() -> Self {
         Self {
             children: Arc::new(Mutex::new(Vec::new())),
+            focused_child: Arc::new(Mutex::new(None)),
             options: StackOptions::default(),
         }
     }
@@ -192,6 +194,7 @@ impl VStack {
     pub fn with_options(options: StackOptions) -> Self {
         Self {
             children: Arc::new(Mutex::new(Vec::new())),
+            focused_child: Arc::new(Mutex::new(None)),
             options,
         }
     }
@@ -208,6 +211,7 @@ impl VStack {
 
         Self {
             children: Arc::new(Mutex::new(entries)),
+            focused_child: Arc::new(Mutex::new(None)),
             options: StackOptions::default(),
         }
     }
@@ -216,6 +220,7 @@ impl VStack {
     pub fn from_entries(children: Vec<StackEntry>) -> Self {
         Self {
             children: Arc::new(Mutex::new(children)),
+            focused_child: Arc::new(Mutex::new(None)),
             options: StackOptions::default(),
         }
     }
@@ -243,12 +248,52 @@ impl VStack {
         if let Ok(mut children) = self.children.lock() {
             children.retain(|e| !Arc::ptr_eq(&e.component, component));
         }
+        if let Ok(mut focused) = self.focused_child.lock() {
+            if focused
+                .as_ref()
+                .is_some_and(|child| Arc::ptr_eq(child, component))
+            {
+                *focused = None;
+            }
+        }
     }
 
     /// Clear all children.
     pub fn clear(&self) {
         if let Ok(mut children) = self.children.lock() {
             children.clear();
+        }
+        if let Ok(mut focused) = self.focused_child.lock() {
+            *focused = None;
+        }
+    }
+
+    /// Route terminal events to a child of this stack.
+    ///
+    /// The child must already belong to this stack. Passing `None` clears the
+    /// current event target. This lets layouts host editors and selectors
+    /// without implementing another event-routing component.
+    pub fn set_focused_child(&self, component: Option<Arc<dyn Component>>) -> bool {
+        if let Some(component) = component {
+            let belongs = self.children.lock().is_ok_and(|children| {
+                children
+                    .iter()
+                    .any(|entry| Arc::ptr_eq(&entry.component, &component))
+            });
+            if !belongs {
+                return false;
+            }
+            if let Ok(mut focused) = self.focused_child.lock() {
+                *focused = Some(component);
+                return true;
+            }
+            return false;
+        }
+        if let Ok(mut focused) = self.focused_child.lock() {
+            *focused = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -302,6 +347,25 @@ impl Default for VStack {
 }
 
 impl Component for VStack {
+    fn set_focus_state(&self, focused: bool) {
+        if let Some(child) = self
+            .focused_child
+            .lock()
+            .ok()
+            .and_then(|child| child.clone())
+        {
+            child.set_focus_state(focused);
+        }
+    }
+
+    fn handle_event(&self, event: &crate::terminal::InputEvent) -> bool {
+        self.focused_child
+            .lock()
+            .ok()
+            .and_then(|focused| focused.clone())
+            .is_some_and(|focused| focused.handle_event(event))
+    }
+
     fn render(&self, width: usize) -> Vec<String> {
         let mut lines = Vec::new();
 
@@ -364,6 +428,46 @@ pub fn layout_vstack_constrained(
     layout_vstack_constrained_with(children, width, height, gap, |component, width| {
         component.render(width).len()
     })
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use std::any::Any;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct EventComponent(Arc<AtomicUsize>);
+
+    impl Component for EventComponent {
+        fn render(&self, _width: usize) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn handle_event(&self, _event: &crate::terminal::InputEvent) -> bool {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+
+        fn invalidate(&self) {}
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn events_are_routed_only_to_the_configured_child() {
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let first: Arc<dyn Component> = Arc::new(EventComponent(first_calls.clone()));
+        let second: Arc<dyn Component> = Arc::new(EventComponent(second_calls.clone()));
+        let stack = VStack::from_children(vec![first.into(), second.clone().into()]);
+
+        assert!(stack.set_focused_child(Some(second)));
+        assert!(stack.handle_event(&crate::terminal::InputEvent::Paste("x".into())));
+        assert_eq!(first_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(second_calls.load(Ordering::Relaxed), 1);
+    }
 }
 
 /// Like [`layout_vstack_constrained`], but measures auto-basis children through

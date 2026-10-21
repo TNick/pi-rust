@@ -48,6 +48,12 @@ pub trait Component: Send + Sync {
         false
     }
 
+    /// Notify a component that it has gained or lost focus.
+    ///
+    /// Components that implement [`Focusable`] should forward this to their
+    /// focus state. The default keeps non-focusable components inert.
+    fn set_focus_state(&self, _focused: bool) {}
+
     /// If true, component receives key release events (Kitty protocol).
     /// Default is false - release events are filtered out.
     fn wants_key_release(&self) -> bool {

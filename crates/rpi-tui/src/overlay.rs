@@ -492,6 +492,8 @@ pub struct Dialog {
     message: Mutex<String>,
     buttons: Mutex<Vec<String>>,
     selected: Mutex<usize>,
+    on_submit: Mutex<Option<Arc<dyn Fn(usize) + Send + Sync>>>,
+    on_cancel: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Dialog {
@@ -502,6 +504,8 @@ impl Dialog {
             message: Mutex::new(message.into()),
             buttons: Mutex::new(buttons),
             selected: Mutex::new(0),
+            on_submit: Mutex::new(None),
+            on_cancel: Mutex::new(None),
         }
     }
 
@@ -544,9 +548,48 @@ impl Dialog {
             }
         }
     }
+
+    /// Set the callback invoked when Enter confirms the selected button.
+    pub fn on_submit(&self, callback: Arc<dyn Fn(usize) + Send + Sync>) {
+        if let Ok(mut current) = self.on_submit.lock() {
+            *current = Some(callback);
+        }
+    }
+
+    /// Set the callback invoked when Escape cancels the dialog.
+    pub fn on_cancel(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut current) = self.on_cancel.lock() {
+            *current = Some(callback);
+        }
+    }
 }
 
 impl Component for Dialog {
+    fn handle_event(&self, event: &crate::terminal::InputEvent) -> bool {
+        use crossterm::event::KeyCode;
+
+        let crate::terminal::InputEvent::Key(key) = event else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Left => self.select_left(),
+            KeyCode::Right => self.select_right(),
+            KeyCode::Enter => {
+                let callback = self.on_submit.lock().ok().and_then(|cb| cb.clone());
+                if let Some(callback) = callback {
+                    callback(self.selected());
+                }
+            }
+            KeyCode::Esc => {
+                if let Some(callback) = self.on_cancel.lock().ok().and_then(|cb| cb.clone()) {
+                    callback();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn render(&self, width: usize) -> Vec<String> {
         let title = self.title.lock().map(|t| t.clone()).unwrap_or_default();
         let message = self.message.lock().map(|m| m.clone()).unwrap_or_default();
@@ -616,6 +659,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dialog_routes_keyboard_selection_and_callbacks() {
+        use crate::terminal::InputEvent;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dialog = Dialog::confirm("Continue?");
+        let submitted = Arc::new(Mutex::new(None));
+        let submitted_callback = submitted.clone();
+        dialog.on_submit(Arc::new(move |index| {
+            *submitted_callback.lock().unwrap() = Some(index);
+        }));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_callback = cancelled.clone();
+        dialog.on_cancel(Arc::new(move || {
+            cancelled_callback.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        assert!(dialog.handle_event(&InputEvent::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        ))));
+        assert!(dialog.handle_event(&InputEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(*submitted.lock().unwrap(), Some(1));
+        assert!(dialog.handle_event(&InputEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(cancelled.load(Ordering::Relaxed), 1);
+        assert!(!dialog.handle_event(&InputEvent::Paste("ignored".into())));
+    }
+
+    #[test]
     fn overlay_wraps_at_allocated_width_and_stays_inside_margins_after_resize() {
         let content = crate::Markdown::new("one two three four five six", 0, 0);
         let options = OverlayOptions {
@@ -632,10 +710,12 @@ mod tests {
         for width in [12, 20, 60] {
             let overlay = render_overlay(&content, &options, width, 10).unwrap();
             assert_eq!(overlay.width, width / 2);
-            assert!(overlay
-                .lines
-                .iter()
-                .all(|row| visible_width(row) <= overlay.width));
+            assert!(
+                overlay
+                    .lines
+                    .iter()
+                    .all(|row| visible_width(row) <= overlay.width)
+            );
             assert!(overlay.x + overlay.width <= width);
             assert!(overlay.y + overlay.lines.len() <= 7);
             if width == 20 {
