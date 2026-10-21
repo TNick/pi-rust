@@ -39,8 +39,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use rpi_ai::{Api, ModelCost, StreamingProtocolCompat};
-use rpi_model_runtime::ConfigValueResolver;
 pub use rpi_model_runtime::{AuthStore, Credential, ModelDefinition, ModelsConfig, ProviderConfig};
+use rpi_model_runtime::{ConfigValueResolver, ModelsConfigFile, ModelsConfigFileError};
 
 /// The config directory name under the home dir.
 pub const CONFIG_DIR_NAME: &str = ".rpi";
@@ -143,6 +143,7 @@ pub fn trust_path() -> Result<PathBuf, ConfigError> {
     Ok(agent_dir()?.join("trust.json"))
 }
 
+#[cfg(test)]
 fn read_text_with_fallback(
     primary: PathBuf,
     fallback: Option<PathBuf>,
@@ -327,12 +328,7 @@ fn map_auth_write_error(error: rpi_model_runtime::CredentialStoreError) -> Confi
 /// Load `~/.rpi/models.json`. Missing file ⇒ empty config (no error).
 pub fn load_models_config() -> Result<ModelsConfig, ConfigError> {
     let path = models_path()?;
-    match read_text_with_fallback(path, None)? {
-        Some((path, text)) => {
-            parse_models_json(&text).map_err(|source| ConfigError::Json { path, source })
-        }
-        None => Ok(ModelsConfig::default()),
-    }
+    ModelsConfigFile::load(&path).map_err(map_models_config_file_error)
 }
 
 /// Atomically write the whole `~/.rpi/models.json` (used by the interactive
@@ -354,11 +350,16 @@ pub fn save_models_config(cfg: &ModelsConfig) -> Result<(), ConfigError> {
         let backup = dir.join(format!("models.json.bak-{stamp}"));
         let _ = std::fs::write(&backup, existing);
     }
-    let text = serde_json::to_string_pretty(cfg).map_err(|source| ConfigError::Json {
-        path: path.clone(),
-        source,
-    })?;
-    atomic_write(&path, text.as_bytes())
+    ModelsConfigFile::save(&path, cfg).map_err(map_models_config_file_error)
+}
+
+/// Maps reusable model-file errors into the CLI configuration error type.
+fn map_models_config_file_error(error: ModelsConfigFileError) -> ConfigError {
+    match error {
+        ModelsConfigFileError::Read { path, source } => ConfigError::Read { path, source },
+        ModelsConfigFileError::Json { path, source } => ConfigError::Json { path, source },
+        ModelsConfigFileError::Write { path, source } => ConfigError::Write { path, source },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +422,7 @@ pub fn project_trust_decision(cwd: &Path) -> Result<Option<bool>, ConfigError> {
 /// Parse the models JSON, tolerating `//` line comments (a minimal subset of
 /// upstream's `stripJsonComments`). Tries strict JSON first; on failure, strips
 /// `//…` to end-of-line and retries.
+#[cfg(test)]
 fn parse_models_json(text: &str) -> Result<ModelsConfig, serde_json::Error> {
     match serde_json::from_str(text) {
         Ok(c) => Ok(c),

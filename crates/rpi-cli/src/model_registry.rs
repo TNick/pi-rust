@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 
-use rpi_ai::Provider;
 use rpi_ai::model::Model;
+use rpi_ai::Provider;
 
 /// Model registry event types
 #[derive(Debug, Clone)]
@@ -349,10 +349,9 @@ impl ModelRegistry {
             .read()
             .map_err(|_| RegistryError::LockPoisoned)?;
 
-        let previous_provider_ids = records.keys().cloned().collect::<Vec<_>>();
         let mut unconfigured_records = std::mem::take(&mut *records);
         let mut next_records = indexmap::IndexMap::new();
-        let mut next_models = indexmap::IndexMap::<String, Vec<Model>>::new();
+        let mut model_rows = Vec::new();
 
         for (provider_id, (name, models)) in configured {
             let baseline_name = provider_id.clone();
@@ -368,10 +367,12 @@ impl ModelRegistry {
                     configured_only: true,
                 });
             record.name = name.unwrap_or_else(|| record.baseline_name.clone());
+            model_rows.push(rpi_model_runtime::ProviderModelRows::new(
+                provider_id.clone(),
+                record.baseline_models.clone(),
+                Some(models),
+            ));
             next_records.insert(provider_id.clone(), record);
-            if !models.is_empty() {
-                next_models.insert(provider_id, models);
-            }
         }
 
         for (provider_id, mut record) in unconfigured_records {
@@ -385,22 +386,17 @@ impl ModelRegistry {
             } else {
                 record.baseline_models.clone()
             };
-            if !models.is_empty() {
-                next_models.insert(provider_id.clone(), models);
-            }
+            model_rows.push(rpi_model_runtime::ProviderModelRows::new(
+                provider_id.clone(),
+                models,
+                None,
+            ));
             next_records.insert(provider_id, record);
         }
 
-        let mut model_changes = next_models
-            .into_iter()
-            .map(|(provider_id, models)| (provider_id, Some(models)))
-            .collect::<indexmap::IndexMap<_, _>>();
-        for provider_id in previous_provider_ids {
-            model_changes.entry(provider_id).or_insert(None);
-        }
         *records = next_records;
 
-        self.catalog.reconcile_provider_changes(model_changes);
+        self.catalog.reconcile_provider_rows(model_rows);
         Ok(())
     }
 
@@ -540,11 +536,9 @@ mod tests {
     fn test_provider_registration() {
         let registry = ModelRegistry::new();
 
-        assert!(
-            registry
-                .register_builtin_provider("test".to_string(), "Test Provider".to_string(), vec![])
-                .is_ok()
-        );
+        assert!(registry
+            .register_builtin_provider("test".to_string(), "Test Provider".to_string(), vec![])
+            .is_ok());
         assert_eq!(registry.provider_count(), 1);
         assert!(registry.has_provider("test"));
     }
@@ -717,11 +711,9 @@ mod tests {
             .register_builtin_provider("test".to_string(), "Test Provider".to_string(), vec![])
             .unwrap();
 
-        assert!(
-            registry
-                .update_auth_status("test", AuthStatus::Authenticated)
-                .is_ok()
-        );
+        assert!(registry
+            .update_auth_status("test", AuthStatus::Authenticated)
+            .is_ok());
         assert_eq!(
             registry.get_auth_status("test"),
             Some(AuthStatus::Authenticated)

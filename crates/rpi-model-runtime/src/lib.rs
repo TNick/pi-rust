@@ -12,6 +12,7 @@ mod live_catalog;
 mod models;
 mod properties;
 mod provider_factory;
+mod provider_rows;
 mod safe_snapshot;
 mod selection;
 
@@ -42,6 +43,8 @@ pub use provider_factory::{
     create_builtin_provider, create_builtin_provider_for_api, supports_builtin_provider_api,
     BuiltinProviderError,
 };
+pub use provider_rows::ProviderModelRows;
+pub use provider_rows::{ModelsConfigFile, ModelsConfigFileError};
 pub use safe_snapshot::{
     safe_model_execution_configuration, safe_model_snapshot, SafeModelCompatibility,
     SafeModelExecutionConfiguration, SafeModelSnapshot, SafeSamplingParameters,
