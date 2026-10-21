@@ -596,6 +596,10 @@ impl Default for Input {
 }
 
 impl Component for Input {
+    fn set_focus_state(&self, focused: bool) {
+        self.set_focused(focused);
+    }
+
     fn render(&self, width: usize) -> Vec<String> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let focused = *self.focused.lock().unwrap_or_else(|e| e.into_inner());

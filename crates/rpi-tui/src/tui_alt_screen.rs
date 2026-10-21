@@ -133,6 +133,7 @@ pub struct TuiAltScreen {
     show_hardware_cursor: Mutex<bool>,
     clear_on_shrink: Mutex<bool>,
     focused: Arc<Mutex<Option<Arc<dyn Component>>>>,
+    global_input_handler: Arc<Mutex<Option<Arc<dyn Fn(&InputEvent) -> bool + Send + Sync>>>>,
     full_redraw_count: Mutex<usize>,
     previous_screen: Mutex<Vec<String>>,
     /// Size the frame in `previous_screen` was laid out for. Any mismatch means
@@ -195,6 +196,7 @@ impl TuiAltScreen {
             show_hardware_cursor: Mutex::new(show_hardware_cursor),
             clear_on_shrink: Mutex::new(false),
             focused: Arc::new(Mutex::new(None)),
+            global_input_handler: Arc::new(Mutex::new(None)),
             full_redraw_count: Mutex::new(0),
             previous_screen: Mutex::new(Vec::new()),
             painted_size: Mutex::new((0, 0)),
@@ -584,11 +586,24 @@ impl TuiAltScreen {
             return true;
         }
 
-        let consumed = dispatch_to_focused(&self.focused, &event);
+        let consumed = dispatch_event(&self.focused, &self.global_input_handler, &event);
         if consumed {
             self.request_render(false);
         }
         consumed
+    }
+
+    /// Set a handler that sees key events before the focused component.
+    ///
+    /// Use this for application-wide shortcuts such as quit. Returning `true`
+    /// consumes the key and prevents delivery to the focused component.
+    pub fn set_global_input_handler(
+        &self,
+        handler: Option<Arc<dyn Fn(&InputEvent) -> bool + Send + Sync>>,
+    ) {
+        if let Ok(mut current) = self.global_input_handler.lock() {
+            *current = handler;
+        }
     }
 
     /// Watchdog: re-read the terminal size and repaint when it differs from the
@@ -1121,6 +1136,24 @@ fn dispatch_to_focused(focused: &Mutex<Option<Arc<dyn Component>>>, event: &Inpu
         .is_some_and(|focused| focused.handle_event(event))
 }
 
+/// Dispatch global shortcuts before the currently focused component.
+fn dispatch_event(
+    focused: &Mutex<Option<Arc<dyn Component>>>,
+    global_handler: &Mutex<Option<Arc<dyn Fn(&InputEvent) -> bool + Send + Sync>>>,
+    event: &InputEvent,
+) -> bool {
+    if matches!(event, InputEvent::Key(_))
+        && global_handler
+            .lock()
+            .ok()
+            .and_then(|handler| handler.clone())
+            .is_some_and(|handler| handler(event))
+    {
+        return true;
+    }
+    dispatch_to_focused(focused, event)
+}
+
 impl Component for TuiAltScreen {
     fn render(&self, width: usize) -> Vec<String> {
         self.get_layout_root()
@@ -1195,6 +1228,12 @@ impl TUI for TuiAltScreen {
 
     fn set_focus(&self, component: Option<Arc<dyn Component>>) {
         if let Ok(mut focused) = self.focused.lock() {
+            if let Some(previous) = focused.as_ref() {
+                previous.set_focus_state(false);
+            }
+            if let Some(next) = component.as_ref() {
+                next.set_focus_state(true);
+            }
             *focused = component;
         }
     }
@@ -1234,6 +1273,7 @@ impl TUI for TuiAltScreen {
         // Clone the state needed by callbacks that run on the terminal reader.
         let running = self.running.clone();
         let focused = Arc::clone(&self.focused);
+        let global_input_handler = Arc::clone(&self.global_input_handler);
         let resize_dirty = Arc::clone(&self.resize_dirty);
         let scheduler = Arc::clone(&self.scheduler);
         let scheduler_started = Arc::clone(&self.scheduler_started);
@@ -1256,7 +1296,7 @@ impl TUI for TuiAltScreen {
                     }
                     if matches!(&event, InputEvent::Resize(_, _)) {
                         resize_dirty.store(true, Ordering::Release);
-                    } else if dispatch_to_focused(&focused, &event)
+                    } else if dispatch_event(&focused, &global_input_handler, &event)
                         && scheduler_started.load(Ordering::Acquire)
                     {
                         scheduler.park(false);
@@ -1607,6 +1647,49 @@ mod tests {
 
         assert!(!tui.dispatch_input(InputEvent::Paste("after stop".into())));
         assert_eq!(editor.get_text(), "before stop");
+    }
+
+    #[test]
+    fn global_key_handler_precedes_focused_component() {
+        let tui = TuiAltScreen::new(Box::new(ResizableTerminal::new(40, 8)), false, None);
+        let editor = Arc::new(Editor::simple());
+        editor.set_focused(true);
+        let focused: Arc<dyn Component> = editor.clone();
+        tui.set_focus(Some(focused));
+        tui.set_global_input_handler(Some(Arc::new(
+            |event| matches!(event, InputEvent::Key(key) if key.code == KeyCode::Char('g')),
+        )));
+        tui.start_readerless();
+
+        assert!(tui.dispatch_input(InputEvent::Key(KeyEvent::new(
+            KeyCode::Char('g'),
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(editor.get_text(), "");
+        assert!(tui.dispatch_input(InputEvent::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(editor.get_text(), "x");
+
+        tui.stop(TuiStopOptions::default());
+    }
+
+    #[test]
+    fn set_focus_transfers_focus_state_between_components() {
+        let tui = TuiAltScreen::new(Box::new(ResizableTerminal::new(40, 8)), false, None);
+        let first = Arc::new(Editor::simple());
+        let second = Arc::new(Editor::simple());
+
+        let first_component: Arc<dyn Component> = first.clone();
+        let second_component: Arc<dyn Component> = second.clone();
+        tui.set_focus(Some(first_component));
+        assert!(first.is_focused());
+        tui.set_focus(Some(second_component));
+        assert!(!first.is_focused());
+        assert!(second.is_focused());
+        tui.set_focus(None);
+        assert!(!second.is_focused());
     }
 
     /// A terminal whose size the test controls, so a resize can be replayed

@@ -19,6 +19,7 @@ use crate::ansi::bold;
 use crate::input::Input;
 use crate::select_list::SelectList;
 use crate::spacer::Spacer;
+use crate::terminal::InputEvent;
 use crate::theme::theme;
 use crate::utils::truncate_to_width;
 
@@ -99,6 +100,24 @@ impl SearchableSelectList {
 }
 
 impl Component for SearchableSelectList {
+    fn set_focus_state(&self, focused: bool) {
+        self.set_focused(focused);
+    }
+
+    fn handle_event(&self, event: &InputEvent) -> bool {
+        match event {
+            InputEvent::Key(key) => {
+                self.handle_key(*key);
+                true
+            }
+            InputEvent::Paste(text) => {
+                self.input.handle_paste(text);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn render(&self, width: usize) -> Vec<String> {
         let colors = theme().colors;
         let mut lines: Vec<String> = Vec::new();
@@ -174,6 +193,17 @@ mod tests {
     }
 
     #[test]
+    fn component_event_dispatch_routes_key_and_paste() {
+        let list = list();
+        let selector = SearchableSelectList::new(None, None, list.clone());
+
+        assert!(selector.handle_event(&InputEvent::Paste("gpt".into())));
+        assert_eq!(selector.input().get_value(), "gpt");
+        assert!(selector.handle_event(&InputEvent::Key(key(KeyCode::Down))));
+        assert_eq!(list.get_selected_item().unwrap().value, "gpt-5");
+    }
+
+    #[test]
     fn typing_filters_the_list() {
         let widget = SearchableSelectList::new(Some("Model"), None, list());
         for ch in "deep".chars() {
@@ -241,8 +271,10 @@ mod tests {
     #[test]
     fn search_text_matches_label_and_provider_not_just_value() {
         // `search_text` is what enables matching a display name or provider.
-        let items = vec![SelectItem::new("claude-sonnet-5", "Claude Sonnet 5")
-            .with_search_text("anthropic anthropic/claude-sonnet-5 Claude Sonnet 5")];
+        let items = vec![
+            SelectItem::new("claude-sonnet-5", "Claude Sonnet 5")
+                .with_search_text("anthropic anthropic/claude-sonnet-5 Claude Sonnet 5"),
+        ];
         let widget = SearchableSelectList::new(None, None, Arc::new(SelectList::new(items, 10)));
         for ch in "anthropic".chars() {
             widget.handle_key(key(KeyCode::Char(ch)));

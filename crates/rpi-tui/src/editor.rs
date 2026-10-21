@@ -255,6 +255,7 @@ pub struct Editor {
     keybindings: Arc<Keybindings>,
     on_submit: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
     on_change: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
+    on_cancel: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Undo history (text + caret snapshots). Pushed before each mutation;
     /// consecutive character insertions coalesce into one entry.
     undo_stack: Mutex<UndoStack<EditorSnapshot>>,
@@ -324,6 +325,7 @@ impl Editor {
             keybindings,
             on_submit: Mutex::new(None),
             on_change: Mutex::new(None),
+            on_cancel: Mutex::new(None),
             undo_stack: Mutex::new(UndoStack::with_max_size(200)),
             redo_stack: Mutex::new(Vec::new()),
             kill_ring: Mutex::new(KillRing::new()),
@@ -531,6 +533,15 @@ impl Editor {
     /// Set callback for when text changes.
     pub fn on_change(&self, callback: Arc<dyn Fn(&str) + Send + Sync>) {
         if let Ok(mut cb) = self.on_change.lock() {
+            *cb = Some(callback);
+        }
+    }
+
+    /// Set an optional callback for Escape while this editor has focus.
+    ///
+    /// Without a callback, Escape remains unhandled so a host can route it.
+    pub fn on_cancel(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut cb) = self.on_cancel.lock() {
             *cb = Some(callback);
         }
     }
@@ -1388,6 +1399,10 @@ impl Editor {
 }
 
 impl Component for Editor {
+    fn set_focus_state(&self, focused: bool) {
+        self.set_focused(focused);
+    }
+
     fn render(&self, width: usize) -> Vec<String> {
         let state = self.state.lock().map(|s| s.clone()).unwrap_or_default();
         let mut content_lines = Vec::new();
@@ -1575,6 +1590,15 @@ impl Component for Editor {
 
     fn handle_event(&self, event: &crate::terminal::InputEvent) -> bool {
         match event {
+            crate::terminal::InputEvent::Key(key) if key.code == crossterm::event::KeyCode::Esc => {
+                let callback = self.on_cancel.lock().ok().and_then(|cb| cb.clone());
+                if let Some(callback) = callback {
+                    callback();
+                    true
+                } else {
+                    false
+                }
+            }
             crate::terminal::InputEvent::Key(key) => self.handle_key(*key),
             crate::terminal::InputEvent::Paste(text) => {
                 self.insert(text);
@@ -1604,6 +1628,25 @@ impl Focusable for Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_is_unhandled_by_default_and_uses_optional_cancel_callback() {
+        use crate::terminal::InputEvent;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let editor = Editor::simple();
+        let escape = InputEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!editor.handle_event(&escape));
+
+        let cancels = Arc::new(AtomicUsize::new(0));
+        let callback_cancels = cancels.clone();
+        editor.on_cancel(Arc::new(move || {
+            callback_cancels.fetch_add(1, Ordering::Relaxed);
+        }));
+        assert!(editor.handle_event(&escape));
+        assert_eq!(cancels.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn working_spinner_advances_per_render_not_per_timer() {

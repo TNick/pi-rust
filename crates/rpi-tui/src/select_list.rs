@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use super::component::Component;
 use super::fuzzy::fuzzy_filter;
+use crate::terminal::InputEvent;
 use crate::utils::{truncate_to_width, visible_width};
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH: usize = 32;
@@ -536,6 +537,15 @@ impl SelectList {
 }
 
 impl Component for SelectList {
+    fn handle_event(&self, event: &InputEvent) -> bool {
+        if let InputEvent::Key(key) = event {
+            self.handle_key(*key);
+            true
+        } else {
+            false
+        }
+    }
+
     fn render(&self, width: usize) -> Vec<String> {
         let filtered = if let Ok(filtered) = self.filtered_items.lock() {
             filtered.clone()
@@ -606,6 +616,7 @@ fn normalize_single_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn test_select_list_new() {
@@ -614,6 +625,21 @@ mod tests {
 
         let lines = list.render(40);
         assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn component_event_dispatch_routes_navigation_key() {
+        let list = SelectList::new(
+            vec![SelectItem::new("one", "One"), SelectItem::new("two", "Two")],
+            5,
+        );
+
+        assert!(list.handle_event(&InputEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(list.get_selected_item().unwrap().value, "two");
+        assert!(!list.handle_event(&InputEvent::Paste("ignored".into())));
     }
 
     #[test]
