@@ -5,6 +5,7 @@
 //! conversion are shared by embedded and CLI products.
 
 mod catalog;
+mod config_value;
 mod credential_store;
 mod credentials;
 mod fingerprint;
@@ -20,6 +21,7 @@ pub use catalog::{
     apply_provider_defaults, build_catalog, resolve_model_endpoints, resolve_provider_headers,
     ModelEndpointResolutionError,
 };
+pub use config_value::resolve_environment_template;
 pub use credential_store::{
     delete_auth_credential, read_auth_store, upsert_auth_credential, write_auth_store,
     CredentialStoreError,

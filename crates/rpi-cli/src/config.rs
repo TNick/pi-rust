@@ -508,7 +508,9 @@ pub fn resolve_config_value(
     if let Some(cmd) = config.strip_prefix('!') {
         return resolve_command(cmd);
     }
-    resolve_template(config, env_overlay)
+    rpi_model_runtime::resolve_environment_template(config, env_overlay, |name| {
+        std::env::var(name).ok()
+    })
 }
 
 /// Like [`resolve_config_value`] but **uncached** — mirrors pi's
@@ -521,7 +523,9 @@ pub fn resolve_config_value_uncached(
     if let Some(cmd) = config.strip_prefix('!') {
         return resolve_command_uncached(cmd);
     }
-    resolve_template(config, env_overlay)
+    rpi_model_runtime::resolve_environment_template(config, env_overlay, |name| {
+        std::env::var(name).ok()
+    })
 }
 
 /// Resolve every header value via [`resolve_config_value_uncached`]; drop
@@ -538,136 +542,6 @@ pub fn resolve_headers(
         }
     }
     out
-}
-
-/// Env lookup: `env_overlay` (if present) wins over the process env, matching
-/// pi's `resolveEnvConfigValue` (which checks `env?.[name]` before `process.env`).
-fn env_lookup(name: &str, env_overlay: Option<&BTreeMap<String, String>>) -> Option<String> {
-    if let Some(overlay) = env_overlay {
-        if let Some(v) = overlay.get(name) {
-            return Some(v.clone());
-        }
-    }
-    std::env::var(name).ok()
-}
-
-/// A parsed template part — literal text or an env-var reference.
-enum TemplatePart {
-    Literal(String),
-    Env(String),
-}
-
-/// Parse a `$VAR`/`${VAR}` template (mirrors pi `parseConfigValueTemplate`).
-/// `$$`→`$` and `$!`→`!` are escapes; `${NAME}` requires `NAME` to match
-/// `^[A-Za-z_][A-Za-z0-9_]*$` else the raw slice is kept literal; `$NAME` takes
-/// the longest `[A-Za-z_][A-Za-z0-9_]*` prefix as the name.
-fn parse_template(config: &str) -> Vec<TemplatePart> {
-    let mut parts: Vec<TemplatePart> = Vec::new();
-    let bytes = config.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        // Find the next `$`.
-        match config[i..].find('$') {
-            None => {
-                push_literal(&mut parts, &config[i..]);
-                break;
-            }
-            Some(offset) => {
-                let dollar = i + offset;
-                push_literal(&mut parts, &config[i..dollar]);
-                let after = dollar + 1;
-                let next = bytes.get(after).copied();
-                if next == Some(b'$') || next == Some(b'!') {
-                    push_literal(&mut parts, &config[after..after + 1]);
-                    i = after + 1;
-                    continue;
-                }
-                if next == Some(b'{') {
-                    // ${NAME}
-                    if let Some(end_rel) = config[after + 1..].find('}') {
-                        let end = after + 1 + end_rel;
-                        let name = &config[after + 1..end];
-                        if is_env_name(name) {
-                            parts.push(TemplatePart::Env(name.to_string()));
-                        } else {
-                            // Not a valid name — keep the raw `${…}` literal.
-                            push_literal(&mut parts, &config[dollar..=end]);
-                        }
-                        i = end + 1;
-                        continue;
-                    }
-                    // No closing `}` — literal `$`.
-                    push_literal(&mut parts, "$");
-                    i = after;
-                    continue;
-                }
-                // $NAME (greedy prefix). Bare `$` with no name char follows.
-                if let Some(name) = env_name_prefix(&config[after..]) {
-                    parts.push(TemplatePart::Env(name.to_string()));
-                    i = after + name.len();
-                } else {
-                    push_literal(&mut parts, "$");
-                    i = after;
-                }
-            }
-        }
-    }
-    parts
-}
-
-fn push_literal(parts: &mut Vec<TemplatePart>, value: &str) {
-    if value.is_empty() {
-        return;
-    }
-    if let Some(TemplatePart::Literal(s)) = parts.last_mut() {
-        s.push_str(value);
-    } else {
-        parts.push(TemplatePart::Literal(value.to_string()));
-    }
-}
-
-fn is_env_name(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// The longest `[A-Za-z_][A-Za-z0-9_]*` prefix of `s` (mirrors the TS
-/// `ENV_VAR_NAME_PREFIX_RE` match), or `None` when `s` doesn't start with one.
-fn env_name_prefix(s: &str) -> Option<&str> {
-    let mut chars = s.char_indices();
-    match chars.next() {
-        Some((_, c)) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return None,
-    }
-    let end = chars
-        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_'))
-        .map(|(idx, _)| idx)
-        .unwrap_or(s.len());
-    Some(&s[..end])
-}
-
-/// Resolve a parsed template: any referenced env var that is unset ⇒ the whole
-/// value is `None` (pi semantics). Literal-only templates pass through as-is.
-fn resolve_template(
-    config: &str,
-    env_overlay: Option<&BTreeMap<String, String>>,
-) -> Option<String> {
-    let parts = parse_template(config);
-    let mut out = String::with_capacity(config.len());
-    for part in parts {
-        match part {
-            TemplatePart::Literal(s) => out.push_str(&s),
-            TemplatePart::Env(name) => match env_lookup(&name, env_overlay) {
-                Some(v) => out.push_str(&v),
-                None => return None,
-            },
-        }
-    }
-    Some(out)
 }
 
 /// Run `cmd` (without the leading `!`), returning trimmed stdout. Cached per
