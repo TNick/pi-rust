@@ -9,11 +9,92 @@ use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, DeferredHandle, ErrorReason, StopReason,
     ThinkingBudgets, ThinkingLevel,
 };
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// Provider-owned opaque state for continuing a prior response without replaying
+/// the full conversation context.
+///
+/// The handle is scoped to one provider and model. Its private state is
+/// in-memory only: it has no `Serialize` implementation and its `Debug`
+/// representation redacts the state. Providers should store only a minimal
+/// opaque continuation reference here. Do not store request/response wire
+/// payloads, credentials, or secrets in the state.
+#[derive(Clone)]
+pub struct ProviderContinuation {
+    provider_id: String,
+    model_id: String,
+    state: Arc<dyn Any + Send + Sync>,
+}
+
+impl ProviderContinuation {
+    /// Creates a provider/model-scoped handle around provider-owned state.
+    pub fn new<T>(provider_id: impl Into<String>, model_id: impl Into<String>, state: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            provider_id: provider_id.into(),
+            model_id: model_id.into(),
+            state: Arc::new(state),
+        }
+    }
+
+    /// Returns the provider identity that created this handle.
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    /// Returns the model identity that created this handle.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Returns whether this handle belongs to the requested provider and model.
+    pub fn is_scoped_to(&self, provider_id: &str, model_id: &str) -> bool {
+        self.provider_id == provider_id && self.model_id == model_id
+    }
+
+    /// Borrows the provider's concrete state for request construction.
+    ///
+    /// The callback is the only access to the opaque state. Providers should
+    /// use a private state type and extract only the continuation reference
+    /// required by their own protocol.
+    pub fn with_state<T, R>(&self, use_state: impl FnOnce(&T) -> R) -> Option<R>
+    where
+        T: Any + Send + Sync,
+    {
+        let state = Arc::clone(&self.state).downcast::<T>().ok()?;
+        Some(use_state(&state))
+    }
+}
+
+impl fmt::Debug for ProviderContinuation {
+    /// Formats handle scope while keeping provider-owned state opaque.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderContinuation")
+            .field("provider_id", &self.provider_id)
+            .field("model_id", &self.model_id)
+            .field("state", &"[opaque]")
+            .finish()
+    }
+}
+
+impl PartialEq for ProviderContinuation {
+    /// Clones compare equal while independently created states remain distinct.
+    fn eq(&self, other: &Self) -> bool {
+        self.provider_id == other.provider_id
+            && self.model_id == other.model_id
+            && Arc::ptr_eq(&self.state, &other.state)
+    }
+}
+
+impl Eq for ProviderContinuation {}
 
 /// Rejects opaque options unless a provider defines explicit handling.
 ///
@@ -356,7 +437,7 @@ impl SimpleStreamOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{SimpleStreamOptions, DEFAULT_LLM_API_TIMEOUT};
+    use super::{Provider, ProviderContinuation, SimpleStreamOptions, DEFAULT_LLM_API_TIMEOUT};
     use std::time::Duration;
 
     #[test]
@@ -374,6 +455,48 @@ mod tests {
 
         options.timeout = None;
         assert_eq!(options.request_timeout(), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn provider_continuation_is_scoped_and_redacts_opaque_state() {
+        let continuation =
+            ProviderContinuation::new("provider-a", "model-a", "private-continuation-reference");
+        let clone = continuation.clone();
+
+        assert!(continuation.is_scoped_to("provider-a", "model-a"));
+        assert!(!continuation.is_scoped_to("provider-b", "model-a"));
+        assert!(!continuation.is_scoped_to("provider-a", "model-b"));
+        assert_eq!(continuation, clone);
+        assert_eq!(
+            continuation.with_state::<String, _>(String::clone),
+            Some("private-continuation-reference".to_owned())
+        );
+        let debug = format!("{continuation:?}");
+        assert!(debug.contains("provider-a"));
+        assert!(!debug.contains("private-continuation-reference"));
+    }
+
+    #[tokio::test]
+    async fn default_provider_continuation_rejects_out_of_scope_handles() {
+        use crate::providers::faux::{FauxProvider, FauxScript};
+        use crate::types::AssistantMessageEvent;
+
+        let provider = FauxProvider::new(FauxScript::new());
+        let model = provider.default_model().clone();
+        let continuation =
+            ProviderContinuation::new("another-provider", model.id.clone(), "opaque-state");
+        let mut stream = provider
+            .stream_simple_with_continuation(&model, &continuation, &SimpleStreamOptions::default())
+            .await;
+
+        let event = stream.next().await.expect("continuation error event");
+        let AssistantMessageEvent::Error { error, .. } = event else {
+            panic!("out-of-scope continuation should fail closed");
+        };
+        assert_eq!(
+            error.error_message.as_deref(),
+            Some("provider continuation scope does not match this model")
+        );
     }
 }
 
@@ -400,6 +523,53 @@ pub trait Provider: Send + Sync {
         ctx: &Context,
         opts: &SimpleStreamOptions,
     ) -> AssistantMessageEventStream;
+
+    /// Extracts provider-owned continuation state from a completed response.
+    ///
+    /// Implementations may return a handle only when the response can be
+    /// continued without retaining its wire payload or credentials. The
+    /// returned handle is in-memory only and must remain scoped to this
+    /// provider and the supplied model. Overrides of
+    /// `stream_simple_with_continuation` must verify this scope before reading
+    /// provider-owned state.
+    fn continuation_from_response(
+        &self,
+        _model: &Model,
+        _response: &AssistantMessage,
+    ) -> Option<ProviderContinuation> {
+        None
+    }
+
+    /// Continues a provider response without a conversation context.
+    ///
+    /// This is a separate capability from [`DeferredProvider`], which polls a
+    /// response that has not completed yet. The default fails closed so a
+    /// provider cannot accidentally ignore a continuation or replay an
+    /// unrelated conversation.
+    ///
+    /// # Parameters
+    /// - `model`: Model that must match the handle's scope.
+    /// - `continuation`: Opaque provider-owned state previously returned by
+    ///   [`Provider::continuation_from_response`].
+    /// - `opts`: Request options. Credentials are supplied separately by the
+    ///   host/provider and are never stored in the continuation handle.
+    ///
+    /// # Returns
+    /// The continued response event stream, or a safe error stream if the
+    /// handle is out of scope or the provider does not implement continuation.
+    async fn stream_simple_with_continuation(
+        &self,
+        model: &Model,
+        continuation: &ProviderContinuation,
+        _opts: &SimpleStreamOptions,
+    ) -> AssistantMessageEventStream {
+        let message = if continuation.is_scoped_to(self.id(), &model.id) {
+            "provider does not support response continuation"
+        } else {
+            "provider continuation scope does not match this model"
+        };
+        continuation_error_stream(model, self.id(), message)
+    }
 
     /// Stream a request and report sanitized settings from its final body.
     ///
@@ -500,6 +670,27 @@ pub trait Provider: Send + Sync {
     fn deferred(&self) -> Option<&dyn DeferredProvider> {
         None
     }
+}
+
+/// Creates a terminal error stream for a rejected continuation request.
+fn continuation_error_stream(
+    model: &Model,
+    provider_id: &str,
+    message: &str,
+) -> AssistantMessageEventStream {
+    let (mut producer, stream) = create_assistant_message_event_stream();
+    producer.push(AssistantMessageEvent::Error {
+        reason: ErrorReason::Error,
+        error: AssistantMessage::terminal(
+            model.api.clone(),
+            provider_id,
+            model.id.clone(),
+            StopReason::Error,
+            message,
+            0,
+        ),
+    });
+    stream
 }
 
 /// Continue a response the provider deferred (a long-poll or batch API).

@@ -43,7 +43,8 @@ it is the default.
 - `event_stream` — the producer/consumer streaming queue behind
   `AssistantMessageEventStream`.
 - `provider` — the `Provider` trait seam, `ProviderHooks`, `SimpleStreamOptions`,
-  and the optional `DeferredProvider` capability for long-poll APIs.
+  the context-free opaque `ProviderContinuation` capability, and the optional
+  `DeferredProvider` capability for long-poll APIs.
 - `providers` — concrete implementations: `faux` (always), `anthropic`,
   `openai_completions`, `openai_responses` (behind `providers`).
   DeepSeek, OpenRouter, llama.cpp and Proxy live together in the optional
@@ -75,6 +76,18 @@ pub trait Provider: Send + Sync {
 running, and reports failures as `Error` events rather than `Err`. That keeps
 the harness and the agent loop uniform across providers: one code path handles
 a network failure, a malformed frame, and a cancelled request.
+
+## Opaque provider continuations
+
+Providers can opt into context-free response continuation by returning a
+`ProviderContinuation` from `Provider::continuation_from_response` and
+implementing `Provider::stream_simple_with_continuation`. The handle is scoped
+to one provider and model and contains only in-memory provider-owned state. It
+is neither serializable nor printed by `Debug`; implementations must keep only
+a minimal opaque reference in that state and must not put request payloads or
+credentials there. This capability continues a completed response without a
+conversation `Context`. It is separate from `DeferredProvider`, which polls an
+unfinished response.
 
 ## Testing without a network
 
