@@ -43,6 +43,8 @@ struct TreeState {
     selected: Option<String>,
     expanded: HashSet<String>,
     scroll_offset: usize,
+    visible_rows: Vec<TreeRow>,
+    visible_index: HashMap<String, usize>,
 }
 
 /// A keyboard-navigable tree list with stable IDs and bounded visible rows.
@@ -108,7 +110,7 @@ impl TreeList {
             }
         }
         let selected = items.first().map(|item| item.id.clone());
-        Ok(Self {
+        let tree = Self {
             items,
             item_index,
             children,
@@ -118,8 +120,14 @@ impl TreeList {
                 selected,
                 expanded,
                 scroll_offset: 0,
+                visible_rows: Vec::new(),
+                visible_index: HashMap::new(),
             }),
-        })
+        };
+        if let Ok(mut state) = tree.state.lock() {
+            tree.rebuild_visible(&mut state);
+        }
+        Ok(tree)
     }
 
     /// Returns the currently selected caller-provided ID.
@@ -145,14 +153,20 @@ impl TreeList {
             .item_index
             .get(id)
             .and_then(|index| self.items[*index].parent_id.clone());
+        let mut expanded = false;
         while let Some(parent_id) = parent {
-            state.expanded.insert(parent_id.clone());
+            expanded |= state.expanded.insert(parent_id.clone());
             parent = self
                 .item_index
                 .get(&parent_id)
                 .and_then(|index| self.items[*index].parent_id.clone());
         }
-        state.selected = Some(id.to_owned());
+        if expanded {
+            state.selected = Some(id.to_owned());
+            self.rebuild_visible(&mut state);
+        } else {
+            self.set_selected(&mut state, id.to_owned());
+        }
         self.keep_selection_visible(&mut state);
         true
     }
@@ -175,10 +189,10 @@ impl TreeList {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        if expanded {
-            state.expanded.insert(id.to_owned());
+        let changed = if expanded {
+            state.expanded.insert(id.to_owned())
         } else {
-            state.expanded.remove(id);
+            let changed = state.expanded.remove(id);
             if state
                 .selected
                 .as_deref()
@@ -186,6 +200,10 @@ impl TreeList {
             {
                 state.selected = Some(id.to_owned());
             }
+            changed
+        };
+        if changed {
+            self.rebuild_visible(&mut state);
         }
         self.keep_selection_visible(&mut state);
         true
@@ -209,85 +227,122 @@ impl TreeList {
         let Ok(mut state) = self.state.lock() else {
             return Vec::new();
         };
-        let rows = self.flatten_visible(&state);
-        if rows.is_empty() {
+        if state.visible_rows.is_empty() {
             state.scroll_offset = 0;
-            return rows;
+            return Vec::new();
         }
-        let selected = rows.iter().position(|row| row.selected).unwrap_or_default();
-        state.scroll_offset =
-            bounded_offset(state.scroll_offset, selected, rows.len(), self.max_visible);
-        rows.into_iter()
+        let selected = state
+            .selected
+            .as_deref()
+            .and_then(|id| state.visible_index.get(id).copied())
+            .unwrap_or_default();
+        state.scroll_offset = bounded_offset(
+            state.scroll_offset,
+            selected,
+            state.visible_rows.len(),
+            self.max_visible,
+        );
+        state
+            .visible_rows
+            .iter()
             .skip(state.scroll_offset)
             .take(self.max_visible)
+            .cloned()
             .collect()
     }
 
     /// Moves selection by one visible row in the requested direction.
     fn move_selection(&self, delta: isize) {
-        let rows =
-            self.flatten_visible(&self.state.lock().unwrap_or_else(|error| error.into_inner()));
-        if rows.is_empty() {
-            return;
-        }
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        let current = rows.iter().position(|row| row.selected).unwrap_or_default();
-        let next = current.saturating_add_signed(delta).min(rows.len() - 1);
-        state.selected = Some(rows[next].id.clone());
+        if state.visible_rows.is_empty() {
+            return;
+        }
+        let current = state
+            .selected
+            .as_deref()
+            .and_then(|id| state.visible_index.get(id).copied())
+            .unwrap_or_default();
+        let next = current
+            .saturating_add_signed(delta)
+            .min(state.visible_rows.len() - 1);
+        let id = state.visible_rows[next].id.clone();
+        self.set_selected(&mut state, id);
         self.keep_selection_visible(&mut state);
     }
 
     /// Keeps the selected row inside the current bounded viewport.
     fn keep_selection_visible(&self, state: &mut TreeState) {
-        let rows = self.flatten_visible(state);
         let Some(selected) = state
             .selected
             .as_deref()
-            .and_then(|id| rows.iter().position(|row| row.id == id))
+            .and_then(|id| state.visible_index.get(id).copied())
         else {
             return;
         };
-        state.scroll_offset =
-            bounded_offset(state.scroll_offset, selected, rows.len(), self.max_visible);
+        state.scroll_offset = bounded_offset(
+            state.scroll_offset,
+            selected,
+            state.visible_rows.len(),
+            self.max_visible,
+        );
     }
 
-    /// Flattens expanded branches into rows in caller-defined sibling order.
-    fn flatten_visible(&self, state: &TreeState) -> Vec<TreeRow> {
-        fn append(
-            tree: &TreeList,
-            state: &TreeState,
-            parent: Option<String>,
-            rows: &mut Vec<TreeRow>,
-        ) {
-            let Some(children) = tree.children.get(&parent) else {
-                return;
+    /// Rebuilds the expanded preorder cache after tree structure changes.
+    fn rebuild_visible(&self, state: &mut TreeState) {
+        let mut rows = Vec::new();
+        let mut pending = self
+            .children
+            .get(&None)
+            .into_iter()
+            .flatten()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            let Some(index) = self.item_index.get(&id).copied() else {
+                continue;
             };
-            for id in children {
-                let Some(index) = tree.item_index.get(id) else {
-                    continue;
-                };
-                let item = &tree.items[*index];
-                let has_children = tree.children.contains_key(&Some(id.clone()));
-                let expanded = state.expanded.contains(id);
-                rows.push(TreeRow {
-                    id: item.id.clone(),
-                    label: item.label.clone(),
-                    depth: tree.depths.get(id).copied().unwrap_or_default(),
-                    has_children,
-                    expanded,
-                    selected: state.selected.as_deref() == Some(id),
-                });
-                if expanded {
-                    append(tree, state, Some(id.clone()), rows);
+            let item = &self.items[index];
+            let has_children = self.has_children(&id);
+            let expanded = state.expanded.contains(&id);
+            rows.push(TreeRow {
+                id: item.id.clone(),
+                label: item.label.clone(),
+                depth: self.depths.get(&id).copied().unwrap_or_default(),
+                has_children,
+                expanded,
+                selected: state.selected.as_deref() == Some(&id),
+            });
+            if expanded {
+                if let Some(children) = self.children.get(&Some(id)) {
+                    pending.extend(children.iter().rev().cloned());
                 }
             }
         }
+        state.visible_index = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.id.clone(), index))
+            .collect();
+        state.visible_rows = rows;
+    }
 
-        let mut rows = Vec::new();
-        append(self, state, None, &mut rows);
-        rows
+    /// Updates the selected identity and markers in constant time.
+    fn set_selected(&self, state: &mut TreeState, id: String) {
+        if let Some(previous) = state.selected.replace(id.clone()) {
+            if let Some(index) = state.visible_index.get(&previous) {
+                if let Some(row) = state.visible_rows.get_mut(*index) {
+                    row.selected = false;
+                }
+            }
+        }
+        if let Some(index) = state.visible_index.get(&id) {
+            if let Some(row) = state.visible_rows.get_mut(*index) {
+                row.selected = true;
+            }
+        }
     }
 
     /// Reports whether an item has child items.
@@ -321,11 +376,7 @@ impl Component for TreeList {
             .into_iter()
             .map(|row| {
                 let marker = if row.has_children {
-                    if row.expanded {
-                        "▾ "
-                    } else {
-                        "▸ "
-                    }
+                    if row.expanded { "▾ " } else { "▸ " }
                 } else {
                     "  "
                 };
@@ -496,6 +547,30 @@ mod tests {
             vec!["b", "c"]
         );
         assert_eq!(tree.render(20).len(), 2);
+    }
+
+    /// Renders a deep tree without recursively traversing its expanded path.
+    #[test]
+    fn deep_tree_uses_cached_visible_rows_and_bounded_rendering() {
+        let items = (0..4096)
+            .map(|index| {
+                let id = format!("node-{index}");
+                let parent_id = (index > 0).then(|| format!("node-{}", index - 1));
+                TreeItem {
+                    id,
+                    label: format!("Node {index}"),
+                    parent_id,
+                }
+            })
+            .collect();
+        let tree = TreeList::new(items, 16).unwrap();
+
+        assert!(tree.select("node-4095"));
+
+        let rows = tree.visible_rows();
+        assert_eq!(rows.len(), 16);
+        assert_eq!(rows.last().map(|row| row.id.as_str()), Some("node-4095"));
+        assert!(rows.last().is_some_and(|row| row.selected));
     }
 
     /// Rejects duplicate IDs, unresolved parents, and cycles.

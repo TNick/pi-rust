@@ -87,6 +87,7 @@ pub use box_component::Box;
 pub use component::{Component, Focusable};
 pub use container::Container;
 pub use countdown_timer::CountdownTimer;
+pub use crossterm::event::{KeyCode, KeyModifiers};
 pub use diff::render_diff;
 pub use dynamic_border::DynamicBorder;
 pub use editor::{Editor, EditorOptions, EditorStyle, WorkingState};
