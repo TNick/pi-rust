@@ -307,6 +307,8 @@ pub struct PluginToolAdapter {
     origin: ExtensionToolOrigin,
     /// Optional host policy run before extension code is called.
     authorization: Option<PluginToolAuthorization>,
+    /// Require host policy for adapters created from a registry entry.
+    authorization_required: bool,
     /// Opaque plugin execution callbacks.
     handle: PluginToolHandle,
     /// Injected into every call's arguments under
@@ -327,9 +329,19 @@ pub struct PluginToolAdapter {
 pub type PluginToolAuthorization = Arc<dyn Fn(&ExtensionToolOrigin, &Value) -> bool + Send + Sync>;
 
 impl PluginToolAdapter {
-    /// Build an adapter from the registered schema + handle + the session's
-    /// keepalive. `label` defaults to the tool name. The keepalive clone keeps
-    /// the owning cdylib mapped for the adapter's lifetime.
+    /// Builds a compatibility adapter from a schema and plugin handle.
+    ///
+    /// This constructor has no host authorization policy. Hosts attaching a
+    /// registry origin must use [`from_registered`](Self::from_registered),
+    /// which fails closed until a policy is installed.
+    ///
+    /// # Parameters
+    /// - `schema`: Provider-facing tool definition.
+    /// - `handle`: Plugin execution callbacks.
+    /// - `keepalive`: Session library owner retained through every tool call.
+    ///
+    /// # Returns
+    /// A compatibility adapter without registry authorization enforcement.
     pub fn new(schema: Tool, handle: PluginToolHandle, keepalive: Arc<PluginKeepalive>) -> Self {
         let label = schema.name.clone();
         let origin = ExtensionToolOrigin {
@@ -341,6 +353,7 @@ impl PluginToolAdapter {
             label,
             origin,
             authorization: None,
+            authorization_required: false,
             handle,
             context: ToolCallContext::default(),
             keepalive,
@@ -364,6 +377,7 @@ impl PluginToolAdapter {
     /// The adapter with its origin available to host authorization policy.
     pub fn with_origin(mut self, origin: ExtensionToolOrigin) -> Self {
         self.origin = origin;
+        self.authorization_required = true;
         self
     }
 
@@ -391,20 +405,26 @@ impl PluginToolAdapter {
         F: Fn(&ExtensionToolOrigin, &Value) -> bool + Send + Sync + 'static,
     {
         self.authorization = Some(Arc::new(authorization));
+        self.authorization_required = true;
         self
     }
 
-    /// Builds an adapter from a host registry entry and its session keepalive.
+    /// Builds a fail-closed adapter from a host registry entry.
+    ///
+    /// The adapter rejects calls until a host authorization policy is
+    /// installed with [`with_pre_execute_authorizer`](Self::with_pre_execute_authorizer).
     ///
     /// # Parameters
     /// - `registered`: Registry entry with its host-stamped origin.
     /// - `keepalive`: Session library owner retained through every tool call.
     ///
     /// # Returns
-    /// An adapter preserving the registered tool's origin and schema.
+    /// An adapter preserving the origin and schema that denies calls by default.
     pub fn from_registered(registered: &ExtensionTool, keepalive: Arc<PluginKeepalive>) -> Self {
-        Self::new(registered.tool.clone(), registered.handle(), keepalive)
-            .with_origin(registered.origin.clone())
+        let mut adapter = Self::new(registered.tool.clone(), registered.handle(), keepalive)
+            .with_origin(registered.origin.clone());
+        adapter.authorization_required = true;
+        adapter
     }
 
     /// Builds a registered adapter with mandatory host pre-execution policy.
@@ -495,12 +515,14 @@ impl AgentTool for PluginToolAdapter {
         signal: CancellationToken,
         on_update: Arc<dyn Fn(ToolResultPartial) + Send + Sync>,
     ) -> Result<AgentToolResult, AgentError> {
-        if self
-            .authorization
-            .as_ref()
-            .is_some_and(|authorize| !authorize(&self.origin, &params))
-        {
-            return Err(AgentError::Tool("plugin tool is not authorized".into()));
+        match self.authorization.as_ref() {
+            Some(authorize) if !authorize(&self.origin, &params) => {
+                return Err(AgentError::Tool("plugin tool is not authorized".into()));
+            }
+            None if self.authorization_required => {
+                return Err(AgentError::Tool("plugin tool is not authorized".into()));
+            }
+            _ => {}
         }
         // 1. Acquire the ambient runtime (the adapter only runs inside the agent
         //    loop's runtime). Do NOT own a runtime.
