@@ -148,6 +148,7 @@ pub(crate) fn report_applied_request_settings(
     let mut applied_values = BTreeMap::new();
     for key in [
         "model",
+        "previous_response_id",
         "temperature",
         "top_p",
         "frequency_penalty",
@@ -163,7 +164,7 @@ pub(crate) fn report_applied_request_settings(
     ] {
         if let Some(value) = body.get(key) {
             let valid_scalar = match key {
-                "model" => value.is_string(),
+                "model" | "previous_response_id" => value.is_string(),
                 "temperature" | "top_p" | "frequency_penalty" | "presence_penalty" => {
                     value.is_number()
                 }
@@ -571,6 +572,44 @@ pub trait Provider: Send + Sync {
         continuation_error_stream(model, self.id(), message)
     }
 
+    /// Streams with opt-in response continuation and an audited request boundary.
+    ///
+    /// Providers must use `ctx` to identify new input while honoring the
+    /// optional opaque continuation, consume protected credentials only during
+    /// request construction, and report final request settings through
+    /// `callback`. Calling this method with `None` opts in to any provider-side
+    /// response retention required for a later continuation. The default fails
+    /// closed so continuation cannot bypass auth or reporting by falling back
+    /// to the legacy continuation method.
+    ///
+    /// # Parameters
+    /// - `model`: Model that must match the continuation scope.
+    /// - `ctx`: Current provider-neutral context for the next request.
+    /// - `continuation`: Optional opaque handle produced by this provider.
+    /// - `opts`: Non-secret request options.
+    /// - `request_secret`: Optional host-protected credential and bearer mode.
+    /// - `callback`: Required sink for sanitized final request settings.
+    ///
+    /// # Returns
+    /// The continued response event stream or a safe unsupported error.
+    async fn stream_simple_with_continuation_and_applied_settings(
+        &self,
+        model: &Model,
+        _ctx: &Context,
+        continuation: Option<&ProviderContinuation>,
+        _opts: &SimpleStreamOptions,
+        _request_secret: Option<(&RequestSecret, bool)>,
+        _callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        let message = match continuation {
+            Some(continuation) if !continuation.is_scoped_to(self.id(), &model.id) => {
+                "provider continuation scope does not match this model"
+            }
+            _ => "provider does not support audited response continuation",
+        };
+        continuation_error_stream(model, self.id(), message)
+    }
+
     /// Stream a request and report sanitized settings from its final body.
     ///
     /// Providers that do not expose request preparation keep their existing
@@ -673,7 +712,7 @@ pub trait Provider: Send + Sync {
 }
 
 /// Creates a terminal error stream for a rejected continuation request.
-fn continuation_error_stream(
+pub(crate) fn continuation_error_stream(
     model: &Model,
     provider_id: &str,
     message: &str,

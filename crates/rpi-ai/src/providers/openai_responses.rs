@@ -7,7 +7,8 @@ use crate::event_stream::{
 use crate::model::{Model, StreamingProtocolCompat};
 use crate::provider::{
     reject_opaque_provider_options, report_applied_request_settings,
-    AppliedRequestSettingsCallback, Provider, RequestSecret, SimpleStreamOptions,
+    AppliedRequestSettingsCallback, Provider, ProviderContinuation, RequestSecret,
+    SimpleStreamOptions,
 };
 use crate::providers::anthropic::cost::calculate_cost;
 use crate::providers::anthropic::json_parse::parse_streaming_json;
@@ -109,11 +110,19 @@ impl Provider for OpenAiResponsesProvider {
         }
         let (mut producer, stream) = create_assistant_message_event_stream();
         let http = self.http.clone();
-        let key = self.api_key.clone();
-        let allow_env_api_key = self.allow_env_api_key;
+        let has_protected_secret = request_secret.is_some();
+        let key = if has_protected_secret {
+            None
+        } else {
+            self.api_key.clone()
+        };
+        let allow_env_api_key = self.allow_env_api_key && !has_protected_secret;
         let model = model.clone();
         let ctx = Arc::new(ctx.clone());
-        let opts = opts.clone();
+        let mut opts = opts.clone();
+        if has_protected_secret {
+            opts.api_key = None;
+        }
         tokio::spawn(async move {
             run_stream(
                 &mut producer,
@@ -123,6 +132,7 @@ impl Provider for OpenAiResponsesProvider {
                 &model,
                 &ctx,
                 &opts,
+                None,
                 None,
                 None,
             )
@@ -159,6 +169,7 @@ impl Provider for OpenAiResponsesProvider {
                 &opts,
                 Some(callback),
                 None,
+                None,
             )
             .await;
         });
@@ -187,6 +198,115 @@ impl Provider for OpenAiResponsesProvider {
     ) -> AssistantMessageEventStream {
         self.stream_with_request_secret(model, ctx, opts, secret, bearer, Some(callback))
     }
+
+    fn continuation_from_response(
+        &self,
+        model: &Model,
+        response: &AssistantMessage,
+    ) -> Option<ProviderContinuation> {
+        if response.stop_reason == StopReason::Error || response.stop_reason == StopReason::Aborted
+        {
+            return None;
+        }
+        let response_id = response.response_id.as_ref()?.trim();
+        if response_id.is_empty()
+            || response.provider != self.id
+            || response.model != model.id
+            || response.api != model.api
+        {
+            return None;
+        }
+        Some(ProviderContinuation::new(
+            self.id.clone(),
+            model.id.clone(),
+            OpenAiResponsesContinuation {
+                response_id: response_id.to_owned(),
+            },
+        ))
+    }
+
+    async fn stream_simple_with_continuation_and_applied_settings(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        continuation: Option<&ProviderContinuation>,
+        opts: &SimpleStreamOptions,
+        request_secret: Option<(&RequestSecret, bool)>,
+        callback: AppliedRequestSettingsCallback,
+    ) -> AssistantMessageEventStream {
+        let response_id = match continuation {
+            Some(continuation) => {
+                if !continuation.is_scoped_to(self.id(), &model.id) {
+                    return crate::provider::continuation_error_stream(
+                        model,
+                        self.id(),
+                        "provider continuation scope does not match this model",
+                    );
+                }
+                let Some(response_id) =
+                    continuation.with_state::<OpenAiResponsesContinuation, _>(|state| {
+                        state.response_id.clone()
+                    })
+                else {
+                    return crate::provider::continuation_error_stream(
+                        model,
+                        self.id(),
+                        "provider continuation state is invalid",
+                    );
+                };
+                if !ctx.messages.iter().any(|message| {
+                    matches!(message, Message::Assistant(assistant)
+                        if assistant.response_id.as_deref() == Some(response_id.as_str())
+                            && assistant.provider == self.id
+                            && assistant.model == model.id
+                            && assistant.api == model.api)
+                }) {
+                    return crate::provider::continuation_error_stream(
+                        model,
+                        self.id(),
+                        "provider continuation is not present in the current context",
+                    );
+                }
+                Some(response_id)
+            }
+            None => None,
+        };
+        if let Some(stream) = reject_opaque_provider_options(model, &self.id) {
+            return stream;
+        }
+        let (mut producer, stream) = create_assistant_message_event_stream();
+        let http = self.http.clone();
+        let key = self.api_key.clone();
+        let allow_env_api_key = self.allow_env_api_key;
+        let model = model.clone();
+        let ctx = Arc::new(ctx.clone());
+        let opts = opts.clone();
+        let request_secret = request_secret.map(|(secret, bearer)| (secret.clone(), bearer));
+        tokio::spawn(async move {
+            run_stream(
+                &mut producer,
+                http,
+                key,
+                allow_env_api_key,
+                &model,
+                &ctx,
+                &opts,
+                Some(callback),
+                request_secret,
+                response_id,
+                true,
+            )
+            .await;
+        });
+        stream
+    }
+}
+
+#[derive(Debug)]
+/// OpenAI Responses API state needed to continue one completed response.
+struct OpenAiResponsesContinuation {
+    /// Opaque server response identifier, never serialized by ScribeRig state.
+    response_id: String,
 }
 
 impl OpenAiResponsesProvider {
@@ -232,6 +352,8 @@ impl OpenAiResponsesProvider {
                 &opts,
                 callback,
                 Some((secret, bearer)),
+                None,
+                false,
             )
             .await;
         });
@@ -1296,6 +1418,8 @@ fn is_protected_auth_header(name: &str) -> bool {
 /// - `opts`: Non-secret request options.
 /// - `applied_settings_callback`: Optional sink for the prepared-body report.
 /// - `request_secret`: Optional host-protected credential and auth mode.
+/// - `continuation_response_id`: Optional completed response to continue.
+/// - `continuation_enabled`: Whether this call explicitly opts into storage.
 async fn run_stream(
     p: &mut AssistantMessageEventStreamProducer,
     http: reqwest::Client,
@@ -1306,6 +1430,8 @@ async fn run_stream(
     opts: &SimpleStreamOptions,
     applied_settings_callback: Option<AppliedRequestSettingsCallback>,
     request_secret: Option<(RequestSecret, bool)>,
+    continuation_response_id: Option<String>,
+    continuation_enabled: bool,
 ) {
     let mut out = AssistantMessage::empty(
         Api::OpenaiResponses,
@@ -1348,7 +1474,22 @@ async fn run_stream(
         emit_error(p, &mut out, "No API key", false);
         return;
     }
-    let body = build_request(model, ctx, opts);
+    let body = if continuation_enabled {
+        let Some(body) =
+            build_continuation_request(model, ctx, opts, continuation_response_id.as_deref())
+        else {
+            emit_error(
+                p,
+                &mut out,
+                "Continuation response is absent from context",
+                false,
+            );
+            return;
+        };
+        body
+    } else {
+        build_request(model, ctx, opts)
+    };
     report_applied_request_settings(model, applied_settings_callback.as_ref(), &body);
     let url = responses_url(&model.base_url);
     let timeout = opts.request_timeout();
@@ -1739,8 +1880,62 @@ impl ToolCallIndex {
 /// `function_call_output`; sending only the latter is the source of the
 /// "No tool output found for function call ..." 400 error.
 fn build_request(model: &Model, ctx: &Context, opts: &SimpleStreamOptions) -> Value {
+    build_request_from(model, ctx, opts, None)
+        .expect("stateless request does not require a continuation anchor")
+}
+
+/// Builds a Responses request from messages after a known completed response.
+///
+/// # Parameters
+/// - `model`: Model descriptor for request capabilities.
+/// - `ctx`: Current provider-neutral context.
+/// - `opts`: Non-secret request settings.
+/// - `response_id`: Optional completed response that anchors the continuation.
+///
+/// # Returns
+/// A request using `previous_response_id`, or `None` when the anchor is absent.
+fn build_continuation_request(
+    model: &Model,
+    ctx: &Context,
+    opts: &SimpleStreamOptions,
+    response_id: Option<&str>,
+) -> Option<Value> {
+    let body = build_request_from(model, ctx, opts, response_id);
+    body.map(|mut body| {
+        body["store"] = Value::Bool(true);
+        if let Some(response_id) = response_id {
+            body["previous_response_id"] = Value::String(response_id.to_owned());
+        }
+        body
+    })
+}
+
+/// Builds a stateless or response-anchored request body.
+///
+/// # Parameters
+/// - `model`: Model descriptor for request capabilities.
+/// - `ctx`: Current provider-neutral context.
+/// - `opts`: Non-secret request settings.
+/// - `continuation_response_id`: Optional prior response to resume from.
+///
+/// # Returns
+/// The request body, or `None` when the continuation anchor is missing.
+fn build_request_from(
+    model: &Model,
+    ctx: &Context,
+    opts: &SimpleStreamOptions,
+    continuation_response_id: Option<&str>,
+) -> Option<Value> {
     let grammar_tool_properties = grammar_tool_properties(model, &ctx.tools);
     let mut index = ToolCallIndex::default();
+    let continuation_anchor = continuation_response_id.and_then(|response_id| {
+        ctx.messages.iter().position(|message| {
+            matches!(message, Message::Assistant(assistant) if assistant.response_id.as_deref() == Some(response_id))
+        })
+    });
+    if continuation_response_id.is_some() && continuation_anchor.is_none() {
+        return None;
+    }
 
     // First pass: normalize and index every replayable tool call.  The second
     // pass can then resolve results even when a legacy session stores only an
@@ -1777,7 +1972,10 @@ fn build_request(model: &Model, ctx: &Context, opts: &SimpleStreamOptions) -> Va
     let mut emitted_call_ids: HashSet<String> = HashSet::new();
     let mut assistant_message_index = 0usize;
 
-    for message in &ctx.messages {
+    for (message_index, message) in ctx.messages.iter().enumerate() {
+        if continuation_anchor.is_some_and(|anchor| message_index < anchor) {
+            continue;
+        }
         match message {
             Message::User(user) => {
                 flush_pending_tool_results(&mut input, &mut pending, &mut completed, &index);
@@ -1787,6 +1985,16 @@ fn build_request(model: &Model, ctx: &Context, opts: &SimpleStreamOptions) -> Va
                 }
             }
             Message::Assistant(assistant) => {
+                if Some(message_index) == continuation_anchor {
+                    for content in &assistant.content {
+                        if let Content::ToolCall(call) = content {
+                            if let Some(prepared) = index.resolve(&call.id) {
+                                pending.push(prepared.canonical_id.clone());
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let message_index = assistant_message_index;
                 assistant_message_index = assistant_message_index.saturating_add(1);
                 flush_pending_tool_results(&mut input, &mut pending, &mut completed, &index);
@@ -1990,7 +2198,7 @@ fn build_request(model: &Model, ctx: &Context, opts: &SimpleStreamOptions) -> Va
             }
         }
     }
-    body
+    Some(body)
 }
 
 /// Build the Responses output-message shape used when replaying an assistant
@@ -3926,5 +4134,92 @@ mod tests {
         assert_eq!(input[output_index]["call_id"], legacy_id);
 
         server.await.unwrap();
+    }
+
+    #[test]
+    fn continuation_request_sends_only_context_after_response_anchor() {
+        let model = model();
+        let mut previous =
+            AssistantMessage::empty(Api::OpenaiResponses, "openai", model.id.clone(), 1);
+        previous.response_id = Some("resp_anchor".to_owned());
+        previous.stop_reason = StopReason::Stop;
+        let context = Context::new(vec![
+            Message::User(crate::types::UserMessage::new("already sent", 0)),
+            Message::Assistant(Box::new(previous)),
+            Message::User(crate::types::UserMessage::new("new input", 2)),
+        ]);
+
+        let body = build_continuation_request(
+            &model,
+            &context,
+            &SimpleStreamOptions::default(),
+            Some("resp_anchor"),
+        )
+        .expect("anchor exists in current context");
+
+        assert_eq!(body["previous_response_id"], "resp_anchor");
+        assert_eq!(body["input"].as_array().unwrap().len(), 1);
+        assert_eq!(body["input"][0]["content"][0]["text"], "new input");
+        assert_eq!(body["store"], true);
+    }
+
+    #[test]
+    fn continuation_request_rejects_missing_response_anchor() {
+        let body = build_continuation_request(
+            &model(),
+            &Context::new(vec![Message::User(crate::types::UserMessage::new(
+                "new input",
+                2,
+            ))]),
+            &SimpleStreamOptions::default(),
+            Some("resp_missing"),
+        );
+
+        assert!(body.is_none());
+    }
+
+    #[test]
+    fn continuation_capable_initial_request_opts_into_server_retention() {
+        let body = build_continuation_request(
+            &model(),
+            &Context::new(vec![Message::User(crate::types::UserMessage::new(
+                "first input",
+                1,
+            ))]),
+            &SimpleStreamOptions::default(),
+            None,
+        )
+        .expect("initial continuation-capable request has no anchor requirement");
+
+        assert_eq!(body["store"], true);
+        assert!(body.get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn continuation_request_serializes_only_new_tool_outputs_and_user_input() {
+        let model = model();
+        let mut previous = assistant_with_call("call_1");
+        previous.response_id = Some("resp_tools".to_owned());
+        let context = Context::new(vec![
+            Message::User(crate::types::UserMessage::new("run read", 0)),
+            Message::Assistant(Box::new(previous)),
+            tool_result("call_1"),
+            Message::User(crate::types::UserMessage::new("continue", 3)),
+        ]);
+
+        let body = build_continuation_request(
+            &model,
+            &context,
+            &SimpleStreamOptions::default(),
+            Some("resp_tools"),
+        )
+        .expect("anchor exists in current context");
+        let input = body["input"].as_array().unwrap();
+
+        assert_eq!(body["previous_response_id"], "resp_tools");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_1");
+        assert_eq!(input[1]["content"][0]["text"], "continue");
     }
 }
