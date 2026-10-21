@@ -126,34 +126,8 @@ impl ModelCatalog {
     /// # Returns
     /// The revision after applying the replacement.
     pub fn reconcile_ordered_providers(&self, providers: IndexMap<String, Vec<Model>>) -> u64 {
-        let mut state = self
-            .inner
-            .state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut provider_ids = state
-            .providers
-            .keys()
-            .chain(providers.keys())
-            .filter(|provider_id| state.providers.get(*provider_id) != providers.get(*provider_id))
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
-        if !state.providers.keys().eq(providers.keys()) {
-            provider_ids.extend(state.providers.keys().chain(providers.keys()).cloned());
-        }
-        if provider_ids.is_empty() {
-            return state.revision;
-        }
-
-        let provider_ids = provider_ids.into_iter().collect::<Vec<_>>();
-        state.providers = providers;
-        state.revision = state.revision.saturating_add(1);
-        let revision = state.revision;
-        let _ = self.inner.events.send(ModelCatalogEvent {
-            revision,
-            provider_ids,
-        });
-        revision
+        self.reconcile_ordered_providers_snapshot(providers)
+            .revision
     }
 
     /// Atomically replaces an ordered provider slice and retains other rows.
@@ -221,6 +195,20 @@ impl ModelCatalog {
     /// # Returns
     /// The revision after applying the replacement.
     pub fn reconcile_models(&self, models: Vec<Model>) -> u64 {
+        self.reconcile_models_snapshot(models).revision
+    }
+
+    /// Reconciles a complete model list and returns the committed catalog view.
+    ///
+    /// The returned snapshot is captured while the catalog write lock is held,
+    /// so it always represents the exact revision published by this call.
+    ///
+    /// # Parameters
+    /// - `models`: Complete ordered model rows for the new catalog.
+    ///
+    /// # Returns
+    /// The coherent snapshot committed by this reconciliation.
+    pub fn reconcile_models_snapshot(&self, models: Vec<Model>) -> ModelCatalogSnapshot {
         let mut providers = IndexMap::<String, Vec<Model>>::new();
         for model in models {
             providers
@@ -228,7 +216,45 @@ impl ModelCatalog {
                 .or_default()
                 .push(model);
         }
-        self.reconcile_ordered_providers(providers)
+        self.reconcile_ordered_providers_snapshot(providers)
+    }
+
+    /// Reconciles ordered providers and returns the committed catalog view.
+    ///
+    /// # Parameters
+    /// - `providers`: Complete provider-to-model mapping in desired order.
+    ///
+    /// # Returns
+    /// The coherent snapshot committed by this reconciliation.
+    pub fn reconcile_ordered_providers_snapshot(
+        &self,
+        providers: IndexMap<String, Vec<Model>>,
+    ) -> ModelCatalogSnapshot {
+        let mut state = self
+            .inner
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut provider_ids = state
+            .providers
+            .keys()
+            .chain(providers.keys())
+            .filter(|provider_id| state.providers.get(*provider_id) != providers.get(*provider_id))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if !state.providers.keys().eq(providers.keys()) {
+            provider_ids.extend(state.providers.keys().chain(providers.keys()).cloned());
+        }
+        if !provider_ids.is_empty() {
+            let provider_ids = provider_ids.into_iter().collect::<Vec<_>>();
+            state.providers = providers;
+            state.revision = state.revision.saturating_add(1);
+            let _ = self.inner.events.send(ModelCatalogEvent {
+                revision: state.revision,
+                provider_ids,
+            });
+        }
+        snapshot_from_state(&state)
     }
 
     /// Removes a provider's models from the live catalog.
@@ -266,14 +292,7 @@ impl ModelCatalog {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ModelCatalogSnapshot {
-            revision: state.revision,
-            models: state
-                .providers
-                .values()
-                .flat_map(|models| models.iter().cloned())
-                .collect(),
-        }
+        snapshot_from_state(&state)
     }
 
     /// Captures the current models for one provider.
@@ -300,6 +319,24 @@ impl ModelCatalog {
     /// A receiver notified after each provider-scoped or batch update.
     pub fn subscribe(&self) -> broadcast::Receiver<ModelCatalogEvent> {
         self.inner.events.subscribe()
+    }
+}
+
+/// Captures the current catalog data while its state lock is held.
+///
+/// # Parameters
+/// - `state`: Catalog state protected by its read or write lock.
+///
+/// # Returns
+/// An immutable snapshot of the exact state revision.
+fn snapshot_from_state(state: &ModelCatalogState) -> ModelCatalogSnapshot {
+    ModelCatalogSnapshot {
+        revision: state.revision,
+        models: state
+            .providers
+            .values()
+            .flat_map(|models| models.iter().cloned())
+            .collect(),
     }
 }
 
