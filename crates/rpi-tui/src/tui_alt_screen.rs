@@ -2058,6 +2058,29 @@ mod tests {
         assert!(!rendered.contains("\x1b[?1049"));
     }
 
+    /// The lifecycle guard restores terminal state before resuming host panics.
+    #[test]
+    fn run_until_restores_terminal_after_predicate_panics() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let tui = Arc::new(TuiAltScreen::new(
+            Box::new(RecordingTerminal {
+                output: output.clone(),
+            }),
+            true,
+            None,
+        ));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tui.run_until(|| panic!("host predicate panic"));
+        }));
+
+        assert!(result.is_err());
+        assert!(!tui.is_running());
+        let rendered = output.lock().unwrap().clone();
+        assert!(rendered.contains("<raw-off>"));
+        assert!(rendered.contains("\x1b[?1049l"));
+    }
+
     #[test]
     fn cursor_marker_is_never_written_to_the_terminal() {
         let output = Arc::new(Mutex::new(String::new()));

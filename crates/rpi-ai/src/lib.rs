@@ -31,13 +31,13 @@ pub mod types;
 // Flat re-exports — consumers do `use rpi_ai::Message` not `rpi_ai::types::Message`.
 pub use error::AiError;
 pub use event_stream::{AssistantMessageEventStream, AssistantMessageEventStreamProducer};
-pub use model::{Model, StreamingProtocolCompat};
+pub use model::{Model, ProviderOptionsSchema, StreamingProtocolCompat};
 pub use provider::{
     AppliedRequestSettings, AppliedRequestSettingsCallback, CacheRetention, ContextPatch,
     NoopProviderHooks, Provider, ProviderHooks, RequestSecret, SecretMaterial, SimpleStreamOptions,
     SimpleStreamOptionsPatch, DEFAULT_LLM_API_TIMEOUT,
 };
-pub use schema::validate_tool_arguments;
+pub use schema::{validate_json_value, validate_tool_arguments};
 pub use types::{
     Api, AssistantMessage, AssistantMessageEvent, Content, Context, DeferredHandle, DoneReason,
     ErrorReason, ImageContent, InputModality, Message, ModelCost, ModelCostRates, ModelCostTier,

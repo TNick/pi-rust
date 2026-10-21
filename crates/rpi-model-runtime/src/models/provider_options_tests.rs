@@ -1,6 +1,8 @@
 //! Regression fixtures for preserving opaque provider options as runtime data.
 
 use super::*;
+use crate::{model_property_descriptors, set_model_properties, set_model_property};
+use rpi_ai::ProviderOptionsSchema;
 
 /// Resolves literal test configuration without reading host environment values.
 struct EmptyConfigResolver;
@@ -68,4 +70,120 @@ fn provider_options_round_trip_into_runtime_model_without_public_leakage() {
     assert!(!public_model.contains("opaque-sentinel"));
     let debug_model = format!("{model:?}");
     assert!(!debug_model.contains("opaque-sentinel"));
+}
+
+/// Exposes only schema-backed properties and validates/coerces UI edits.
+#[test]
+fn schema_backed_model_property_editor_api() {
+    let mut model = Model::new(
+        "model-a",
+        "Model A",
+        Api::OpenaiCompletions,
+        "pluggy",
+        "https://example.test",
+    );
+    model.provider_options_schema = Some(ProviderOptionsSchema {
+        version: 1,
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "vendor_mode": {
+                    "type": "string",
+                    "title": "Reasoning effort",
+                    "enum": ["low", "high"],
+                    "default": "low"
+                },
+                "reasoning_budget": {"type": "integer"}
+            },
+            "required": ["vendor_mode"],
+            "additionalProperties": false
+        }),
+    });
+
+    let descriptors = model_property_descriptors(&model).expect("schema properties");
+    assert_eq!(descriptors.len(), 2);
+    let effort = descriptors
+        .iter()
+        .find(|property| property.key == "vendor_mode")
+        .expect("vendor mode property");
+    assert!(effort.required);
+    assert_eq!(effort.title.as_deref(), Some("Reasoning effort"));
+    assert_eq!(effort.default, Some(serde_json::json!("low")));
+
+    set_model_property(&mut model, "vendor_mode", serde_json::json!("strict"))
+        .expect("valid property value");
+    let mut values = Map::new();
+    values.insert("vendor_mode".to_owned(), serde_json::json!("strict"));
+    values.insert("reasoning_budget".to_owned(), serde_json::json!("4096"));
+    set_model_properties(&mut model, values).expect("whole object validation and coercion");
+    assert_eq!(model.provider_options["reasoning_budget"], 4096);
+    assert_eq!(
+        model.validated_provider_options().unwrap()["reasoning_budget"],
+        4096
+    );
+}
+
+/// Preserves the provider-owned schema from model configuration into runtime.
+#[test]
+fn configured_provider_schema_reaches_runtime_property_api() {
+    let source = serde_json::json!({
+        "providers": {
+            "pluggy": {
+                "api": "openai-completions",
+                "models": [{
+                    "id": "model-a",
+                    "providerOptionsSchema": {
+                        "version": 1,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "vendor_mode": {"type": "string", "enum": ["fast", "safe"]}
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "vendor_mode": "fast"
+                }]
+            }
+        }
+    });
+    let config: ModelsConfig = serde_json::from_value(source).expect("models config");
+    let provider = config.providers.get("pluggy").expect("provider config");
+    let model = provider_to_models("pluggy", provider, &EmptyConfigResolver)
+        .expect("provider models")
+        .remove(0);
+
+    assert_eq!(model_property_descriptors(&model).unwrap().len(), 1);
+    assert_eq!(
+        model.validated_provider_options().unwrap()["vendor_mode"],
+        "fast"
+    );
+}
+
+/// Failed whole-object replacement leaves the prior configured map intact.
+#[test]
+fn invalid_model_property_replacement_is_transactional() {
+    let mut model = Model::new(
+        "model-a",
+        "Model A",
+        Api::OpenaiCompletions,
+        "pluggy",
+        "https://example.test",
+    );
+    model.provider_options_schema = Some(ProviderOptionsSchema {
+        version: 1,
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {"vendor_mode": {"type": "string"}},
+            "required": ["vendor_mode"],
+            "additionalProperties": false
+        }),
+    });
+    model
+        .provider_options
+        .insert("vendor_mode".to_owned(), serde_json::json!("strict"));
+    let before = model.provider_options.clone();
+
+    assert!(set_model_properties(&mut model, Map::new()).is_err());
+    assert_eq!(model.provider_options, before);
 }

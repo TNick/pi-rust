@@ -78,6 +78,50 @@ fn get_sub_schema_validator(schema: &Value) -> Option<Arc<JSONSchema>> {
     }
 }
 
+/// Validate and coerce one JSON value against a provider-owned schema.
+///
+/// Unlike tool-call validation, this boundary does not include caller values
+/// in its diagnostics because provider configuration may contain sensitive
+/// custom fields.
+///
+/// # Parameters
+/// - `value`: Candidate value to normalize and validate.
+/// - `schema`: Complete JSON Schema document.
+///
+/// # Returns
+/// The schema-coerced value when it satisfies the schema.
+///
+/// # Errors
+/// Returns a schema error for an invalid schema or a rejected value.
+pub fn validate_json_value(value: Value, schema: &Value) -> Result<Value, AiError> {
+    let validator = get_sub_schema_validator(schema).ok_or_else(|| AiError::Schema {
+        message: "provider property schema is invalid".to_owned(),
+    })?;
+    let mut normalized = value;
+    normalize_optional_nulls(&mut normalized, schema);
+    let coerced = coerce_with_json_schema(normalized.clone(), schema);
+    let candidate = if coerced == normalized {
+        &normalized
+    } else {
+        &coerced
+    };
+    if validator.is_valid(candidate) {
+        return Ok(candidate.clone());
+    }
+
+    let errors = collect_validation_errors(&validator, candidate);
+    Err(AiError::Schema {
+        message: if errors.is_empty() {
+            "provider properties do not satisfy their schema".to_owned()
+        } else {
+            format!(
+                "provider properties do not satisfy their schema: {}",
+                errors.join("; ")
+            )
+        },
+    })
+}
+
 // ----------------------------------------------------------------------------
 // coercePrimitiveByType — faithful port of the TS table
 // ----------------------------------------------------------------------------

@@ -4,9 +4,25 @@
 //! `types.rs` because they are model-layer configuration, not the core message
 //! contract. Providers read them off `Model` to decide request shaping.
 
+use crate::error::AiError;
 use crate::types::{Api, InputModality, ModelCost, ProviderId, ThinkingLevelMap};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+
+/// Versioned schema for provider-specific model properties.
+///
+/// This schema version is independent of the provider request-envelope
+/// version. Values are validated and coerced by the provider runtime before
+/// request shaping.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderOptionsSchema {
+    /// Version of the JSON Schema envelope.
+    pub version: u32,
+    /// Object schema describing supported provider-specific properties.
+    pub schema: Value,
+}
 
 /// Compatibility flags for Anthropic Messages-compatible APIs.
 /// Mirrors TS `AnthropicMessagesCompat`. `Default` matches the documented defaults
@@ -200,20 +216,14 @@ pub struct Model {
     pub headers: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<StreamingProtocolCompat>,
-    /// Runtime-only opaque options retained from provider model configuration.
+    /// Runtime-only provider-specific values validated by `provider_options_schema`.
     ///
-    /// Built-in adapters reject non-empty values unless they add explicit
-    /// provider-specific handling. The CLI applies the same fail-closed rule.
-    /// Extension providers that declare `providerOptionsVersion: 1` receive
-    /// non-empty values through the versioned `providerOptions` request field.
-    /// Other extension providers reject calls with non-empty options. This field
-    /// may contain arbitrary runtime configuration and must not contain
-    /// credentials, authorization headers, or other secrets. It is excluded
-    /// from ordinary serialization and Debug output because arbitrary
-    /// properties are not safe for public catalog or session output. Values
-    /// are skipped by ordinary serialization and redacted in `Debug` output.
+    /// Values are excluded from ordinary serialization and redacted in Debug.
     #[serde(skip)]
     pub provider_options: BTreeMap<String, serde_json::Value>,
+    /// Versioned schema for `provider_options`; schema values are safe metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options_schema: Option<ProviderOptionsSchema>,
 }
 
 impl std::fmt::Debug for Model {
@@ -240,6 +250,7 @@ impl std::fmt::Debug for Model {
                 "provider_options",
                 &(!self.provider_options.is_empty()).then_some("[redacted]"),
             )
+            .field("provider_options_schema", &self.provider_options_schema)
             .finish()
     }
 }
@@ -270,7 +281,99 @@ impl Model {
             headers: None,
             compat: None,
             provider_options: BTreeMap::new(),
+            provider_options_schema: None,
         }
+    }
+
+    /// Validate and coerce configured provider-specific model properties.
+    ///
+    /// Property schemas must be finite object schemas with
+    /// `additionalProperties: false`. Request-envelope and credential fields
+    /// cannot be declared as provider-specific properties.
+    ///
+    /// # Returns
+    /// The normalized property map safe to apply to this model's request.
+    ///
+    /// # Errors
+    /// Returns an error when values are present without a schema or fail it.
+    pub fn validated_provider_options(&self) -> Result<Map<String, Value>, AiError> {
+        let Some(properties) = self.provider_option_schema_properties()? else {
+            if self.provider_options.is_empty() {
+                return Ok(Map::new());
+            }
+            return Err(AiError::Schema {
+                message: "provider options require a versioned schema".to_owned(),
+            });
+        };
+        let schema = self
+            .provider_options_schema
+            .as_ref()
+            .expect("checked schema");
+        let values = Value::Object(
+            self.provider_options
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        );
+        let validated = crate::schema::validate_json_value(values, &schema.schema)?;
+        let options = validated
+            .as_object()
+            .cloned()
+            .ok_or_else(|| AiError::Schema {
+                message: "provider options must be an object".to_owned(),
+            })?;
+        if options.keys().any(|key| !properties.contains_key(key)) {
+            return Err(AiError::Schema {
+                message: "provider options contain an undeclared property".to_owned(),
+            });
+        }
+        Ok(options)
+    }
+
+    /// Return the editable top-level property schemas after checking the schema
+    /// version and the request/credential reserved-name boundary.
+    pub fn provider_option_schema_properties(
+        &self,
+    ) -> Result<Option<&Map<String, Value>>, AiError> {
+        let Some(schema) = self.provider_options_schema.as_ref() else {
+            return Ok(None);
+        };
+        if schema.version != 1 {
+            return Err(AiError::Schema {
+                message: "unsupported provider options schema version".to_owned(),
+            });
+        }
+        let schema = self
+            .provider_options_schema
+            .as_ref()
+            .expect("schema checked above");
+        let Some(schema_object) = schema.schema.as_object() else {
+            return Err(AiError::Schema {
+                message: "provider options schema must be an object schema".to_owned(),
+            });
+        };
+        if schema_object.get("type").and_then(Value::as_str) != Some("object")
+            || schema_object.get("additionalProperties") != Some(&Value::Bool(false))
+        {
+            return Err(AiError::Schema {
+                message: "provider options schema must declare a closed object".to_owned(),
+            });
+        }
+        let properties = schema_object
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| AiError::Schema {
+                message: "provider options schema must declare properties".to_owned(),
+            })?;
+        if properties
+            .keys()
+            .any(|key| !provider_option_key_allowed(key, &self.api))
+        {
+            return Err(AiError::Schema {
+                message: "provider options schema contains a reserved property".to_owned(),
+            });
+        }
+        Ok(Some(properties))
     }
 
     /// Explicit zero rates and built-in nonzero rates both count as known pricing.
@@ -326,4 +429,88 @@ impl Model {
         }
         Off
     }
+}
+
+/// Rejects request-envelope and credential properties in a model schema.
+///
+/// # Parameters
+/// - `key`: Provider-specific property name.
+/// - `api`: Provider protocol receiving the property.
+///
+/// # Returns
+/// `true` when the property can be merged into that protocol's request body.
+fn provider_option_key_allowed(key: &str, api: &Api) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    let secret_fields = [
+        "api_key",
+        "apikey",
+        "authorization",
+        "auth",
+        "credential",
+        "credentials",
+        "headers",
+        "password",
+        "secret",
+        "token",
+    ];
+    if secret_fields.contains(&normalized.as_str()) {
+        return false;
+    }
+    let shared_request_fields = [
+        "max_tokens",
+        "max_output_tokens",
+        "max_completion_tokens",
+        "temperature",
+        "top_p",
+        "top_k",
+        "frequency_penalty",
+        "presence_penalty",
+        "seed",
+        "stop",
+        "response_format",
+        "reasoning_effort",
+        "thinking",
+        "thinking_budget",
+        "reasoning_budget",
+        "stream_options",
+    ];
+    if shared_request_fields.contains(&normalized.as_str()) {
+        return false;
+    }
+    let reserved = match api {
+        Api::OpenaiCompletions => &[
+            "model",
+            "messages",
+            "stream",
+            "stream_options",
+            "max_tokens",
+            "max_completion_tokens",
+            "temperature",
+            "reasoning_effort",
+            "tools",
+            "store",
+        ][..],
+        Api::OpenaiResponses => &[
+            "model",
+            "input",
+            "instructions",
+            "stream",
+            "store",
+            "max_output_tokens",
+            "reasoning",
+            "tools",
+        ][..],
+        Api::AnthropicMessages => &[
+            "model",
+            "messages",
+            "max_tokens",
+            "stream",
+            "system",
+            "thinking",
+            "tools",
+            "output_config",
+        ][..],
+        _ => &["model", "stream", "tools"][..],
+    };
+    !reserved.contains(&normalized.as_str())
 }

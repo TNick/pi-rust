@@ -3,7 +3,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use rpi_ai::{Api, InputModality, Model, ModelCost, StreamingProtocolCompat, ThinkingLevelMap};
+use rpi_ai::{
+    Api, InputModality, Model, ModelCost, ProviderOptionsSchema, StreamingProtocolCompat,
+    ThinkingLevelMap,
+};
 use rpi_extensions::ProviderManifest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -111,6 +114,13 @@ pub struct ModelDefinition {
     /// Provider-specific compatibility metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<Value>,
+    /// Versioned schema for the provider-specific properties below.
+    ///
+    /// Only properties declared by this schema can be edited or forwarded to
+    /// an extension provider. Built-in providers continue to reject opaque
+    /// provider options unless they explicitly implement them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options_schema: Option<ProviderOptionsSchema>,
     /// Opaque provider-specific model options with no implicit request effect.
     ///
     /// Unknown model-definition fields are retained here and passed to the
@@ -139,6 +149,7 @@ impl fmt::Debug for ModelDefinition {
             .field("input", &self.input)
             .field("headers", &self.headers.as_ref().map(|_| "[redacted]"))
             .field("compat", &self.compat)
+            .field("provider_options_schema", &self.provider_options_schema)
             .field(
                 "provider_options",
                 &(!self.provider_options.is_empty()).then_some("[redacted]"),
@@ -354,6 +365,7 @@ pub fn provider_to_models(
         }
         model.sampling_params = definition.sampling_params.clone();
         model.provider_options = definition.provider_options.clone();
+        model.provider_options_schema = definition.provider_options_schema.clone();
         model.input = parse_input_modalities(definition.input.as_deref());
         let mut headers = BTreeMap::new();
         for source in [&definition.headers, &config.headers].into_iter().flatten() {

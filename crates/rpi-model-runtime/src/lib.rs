@@ -9,6 +9,7 @@ mod credentials;
 mod fingerprint;
 mod live_catalog;
 mod models;
+mod properties;
 mod provider_factory;
 mod safe_snapshot;
 mod selection;
@@ -27,6 +28,9 @@ pub use live_catalog::{ModelCatalog, ModelCatalogEvent, ModelCatalogSnapshot};
 pub use models::{
     builtin_api_key_env, has_header_auth, provider_to_models, resolve_credential,
     ConfigValueResolver, ModelDefinition, ModelsConfig, ProviderConfig,
+};
+pub use properties::{
+    model_property_descriptors, set_model_properties, set_model_property, ModelPropertyDescriptor,
 };
 pub use provider_factory::{
     create_builtin_provider, create_builtin_provider_for_api, supports_builtin_provider_api,

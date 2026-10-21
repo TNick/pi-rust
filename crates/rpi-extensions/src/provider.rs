@@ -1691,12 +1691,15 @@ fn request_envelope_json(
         ),
         ("options".to_owned(), options_json(opts)),
     ]);
-    if !model.provider_options.is_empty() {
+    let provider_options = model
+        .validated_provider_options()
+        .map_err(|_| "provider options do not satisfy their upstream schema")?;
+    if !provider_options.is_empty() {
         request.insert(
             "providerOptions".to_owned(),
             serde_json::json!({
                 "version": 1,
-                "values": &model.provider_options,
+                "values": provider_options,
             }),
         );
     }
@@ -2130,11 +2133,26 @@ mod tests {
 
         model
             .provider_options
-            .insert("reasoning_effort".to_string(), serde_json::json!("high"));
+            .insert("vendor_mode".to_string(), serde_json::json!("strict"));
         model.provider_options.insert(
-            "reasoning_budget".to_string(),
+            "vendor_budget".to_string(),
             serde_json::json!("opaque-secret-sentinel"),
         );
+        model
+            .provider_options
+            .insert("vendor_limit".to_string(), serde_json::json!("4096"));
+        model.provider_options_schema = Some(rpi_ai::ProviderOptionsSchema {
+            version: 1,
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "vendor_mode": {"type": "string"},
+                    "vendor_budget": {"type": "string"},
+                    "vendor_limit": {"type": "integer"}
+                },
+                "additionalProperties": false
+            }),
+        });
 
         let public_model = serde_json::to_value(&model).expect("public model JSON");
         let request: serde_json::Value = serde_json::from_str(
@@ -2151,13 +2169,43 @@ mod tests {
         assert!(!format!("{model:?}").contains("opaque-secret-sentinel"));
         assert_eq!(request["providerOptions"]["version"], 1);
         assert_eq!(
-            request["providerOptions"]["values"]["reasoning_effort"],
-            "high"
+            request["providerOptions"]["values"]["vendor_mode"],
+            "strict"
         );
         assert_eq!(
-            request["providerOptions"]["values"]["reasoning_budget"],
+            request["providerOptions"]["values"]["vendor_budget"],
             "opaque-secret-sentinel"
         );
+        assert_eq!(request["providerOptions"]["values"]["vendor_limit"], 4096);
+    }
+
+    /// Rejects values that do not satisfy the provider model's schema.
+    #[test]
+    fn provider_options_require_validated_schema_values() {
+        let mut model = Model::new(
+            "m",
+            "Model",
+            rpi_ai::types::Api::OpenaiCompletions,
+            "provider",
+            "https://example.test",
+        );
+        model
+            .provider_options
+            .insert("temperature".to_owned(), serde_json::json!("not-a-number"));
+        model.provider_options_schema = Some(rpi_ai::ProviderOptionsSchema {
+            version: 1,
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {"temperature": {"type": "number"}},
+                "additionalProperties": false
+            }),
+        });
+        assert!(request_envelope_json(
+            &model,
+            &Context::new(vec![]),
+            &SimpleStreamOptions::default(),
+        )
+        .is_err());
     }
 
     /// A callback state used to verify manifest-gated provider requests.
@@ -2277,7 +2325,15 @@ mod tests {
         let mut model_with_options = model.clone();
         model_with_options
             .provider_options
-            .insert("reasoning_effort".to_owned(), serde_json::json!("high"));
+            .insert("vendor_mode".to_owned(), serde_json::json!("strict"));
+        model_with_options.provider_options_schema = Some(rpi_ai::ProviderOptionsSchema {
+            version: 1,
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {"vendor_mode": {"type": "string"}},
+                "additionalProperties": false
+            }),
+        });
         let mut legacy_stream = legacy_provider
             .stream_simple(&model_with_options, &context, &options)
             .await;
@@ -2321,8 +2377,8 @@ mod tests {
             serde_json::from_str(&request).expect("valid provider request JSON");
         assert_eq!(request["providerOptions"]["version"], 1);
         assert_eq!(
-            request["providerOptions"]["values"]["reasoning_effort"],
-            "high"
+            request["providerOptions"]["values"]["vendor_mode"],
+            "strict"
         );
     }
 
