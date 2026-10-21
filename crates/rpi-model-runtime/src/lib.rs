@@ -5,6 +5,7 @@
 //! conversion are shared by embedded and CLI products.
 
 mod catalog;
+mod credential_store;
 mod credentials;
 mod fingerprint;
 mod live_catalog;
@@ -15,10 +16,15 @@ mod safe_snapshot;
 mod selection;
 
 pub use catalog::{apply_provider_defaults, build_catalog, resolve_provider_headers};
+pub use credential_store::{
+    delete_auth_credential, read_auth_store, upsert_auth_credential, write_auth_store,
+    CredentialStoreError,
+};
 pub use credentials::{
     readiness_from_catalog, resolve_credential_protected, resolve_credential_protected_with_policy,
-    AuthStore, Credential, CredentialRequestSource, CredentialResolutionError, CredentialSource,
-    HostCredentialMaterial, ProtectedCredential, ProtectedCredentialResolver, ResolvedCredential,
+    resolve_host_selected_credential_with_policy, AuthStore, Credential, CredentialRequestSource,
+    CredentialResolutionError, CredentialSource, HostCredentialMaterial, ProtectedCredential,
+    ProtectedCredentialResolver, ResolvedCredential,
 };
 pub use fingerprint::{
     model_configuration_fingerprint, model_execution_fingerprint, ModelConfigurationFingerprint,

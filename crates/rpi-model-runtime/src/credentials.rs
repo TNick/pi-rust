@@ -59,6 +59,11 @@ pub type AuthStore = BTreeMap<String, Credential>;
 /// Non-secret source requested from a host credential resolver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CredentialRequestSource {
+    /// Resolve a credential reference already selected by the host.
+    ///
+    /// The resolver is bound to the host's exact reference and authorization
+    /// context; this variant carries no reference or secret material.
+    HostSelected,
     /// Resolve an explicit host-selected command-line credential override.
     CliOverride { provider: String },
     /// Resolve the provider's credential from host-owned persistent storage.
@@ -283,9 +288,46 @@ pub fn resolve_credential_protected_with_policy<T>(
     })
 }
 
+/// Resolves one host-selected credential without applying provider precedence.
+///
+/// Hosts use this when their own policy has already selected an exact secret
+/// reference and bound the resolver to its authorized destination. A miss does
+/// not fall through to CLI, stored, environment, or model-config sources.
+///
+/// # Parameters
+/// - `bearer`: Whether the resolved material is used as bearer authorization.
+/// - `resolver`: Resolver bound to the host-selected credential reference.
+///
+/// # Returns
+/// The protected material tagged with the generic `HostSelected` source, or a
+/// missing result when the host-selected reference is absent.
+///
+/// # Errors
+/// Returns the host's access-denied or resolver-failure result unchanged.
+pub fn resolve_host_selected_credential_with_policy<T>(
+    bearer: bool,
+    resolver: &dyn ProtectedCredentialResolver<T>,
+) -> Result<ProtectedCredential<T>, CredentialResolutionError> {
+    let Some(resolved) = resolver.resolve_with_policy(CredentialRequestSource::HostSelected)?
+    else {
+        return Ok(ProtectedCredential {
+            material: None,
+            source: CredentialSource::Missing,
+            bearer,
+        });
+    };
+    Ok(ProtectedCredential {
+        material: Some(resolved.material),
+        source: CredentialSource::HostSelected,
+        bearer,
+    })
+}
+
 /// Safe description of the source selected for a provider credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CredentialSource {
+    /// Credential reference was selected and authorized by the host.
+    HostSelected,
     /// Credential was supplied as an explicit host command-line override.
     CliOverride,
     /// Credential was loaded from the host's persistent auth store.
@@ -313,6 +355,7 @@ impl CredentialSource {
     /// Returns a safe display value for the source.
     pub fn as_json_str(&self) -> &str {
         match self {
+            Self::HostSelected => "host",
             Self::CliOverride => "cli",
             Self::StoredApiKey => "auth.json",
             Self::StoredOauth => "oauth",

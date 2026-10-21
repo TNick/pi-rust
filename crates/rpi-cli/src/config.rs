@@ -236,31 +236,21 @@ fn migrate_legacy_layout_in(root: &Path, agent: &Path) -> Result<usize, ConfigEr
 /// JSON ⇒ `ConfigError::Json` (we do not silently swallow a corrupt auth file).
 pub fn read_auth() -> Result<AuthStore, ConfigError> {
     let path = auth_path()?;
-    match read_text_with_fallback(path, None)? {
-        Some((path, text)) => {
-            serde_json::from_str(&text).map_err(|source| ConfigError::Json { path, source })
-        }
-        None => Ok(AuthStore::new()),
-    }
+    rpi_model_runtime::read_auth_store(&path).map_err(map_auth_read_error)
 }
 
 /// Atomically write the whole auth store (ensures the dir exists, writes a
 /// temp sibling, `rename`s over the target, then `chmod 0o600` on Unix).
 pub fn write_auth(store: &AuthStore) -> Result<(), ConfigError> {
     let path = auth_path()?;
-    let dir = agent_dir()?;
-    ensure_dir(&dir)?;
-    let json = serde_json::to_string_pretty(store).unwrap();
-    atomic_write(&path, json.as_bytes())?;
-    set_owner_only(&path);
-    Ok(())
+    rpi_model_runtime::write_auth_store(&path, store).map_err(map_auth_write_error)
 }
 
 /// Read-modify-write: upsert a credential for `provider_id`.
 pub fn upsert_credential(provider_id: &str, cred: Credential) -> Result<(), ConfigError> {
-    let mut store = read_auth()?;
-    store.insert(provider_id.to_string(), cred);
-    write_auth(&store)
+    let path = auth_path()?;
+    rpi_model_runtime::upsert_auth_credential(&path, provider_id, cred)
+        .map_err(map_auth_write_error)
 }
 
 /// Store an OAuth token under exactly one provider id using the atomic auth
@@ -302,12 +292,31 @@ pub fn read_oauth_token(provider_id: &str) -> Result<Option<Credential>, ConfigE
 /// the file when the provider existed (so `auth logout` reflects the new state
 /// on disk even if the map isn't empty).
 pub fn delete_credential(provider_id: &str) -> Result<bool, ConfigError> {
-    let mut store = read_auth()?;
-    if store.remove(provider_id).is_some() {
-        write_auth(&store)?;
-        Ok(true)
-    } else {
-        Ok(false)
+    let path = auth_path()?;
+    rpi_model_runtime::delete_auth_credential(&path, provider_id).map_err(map_auth_write_error)
+}
+
+/// Preserves the CLI config error categories for reusable credential reads.
+fn map_auth_read_error(error: rpi_model_runtime::CredentialStoreError) -> ConfigError {
+    match error {
+        rpi_model_runtime::CredentialStoreError::Io { path, source } => {
+            ConfigError::Read { path, source }
+        }
+        rpi_model_runtime::CredentialStoreError::Json { path, source } => {
+            ConfigError::Json { path, source }
+        }
+    }
+}
+
+/// Preserves the CLI config error categories for reusable credential writes.
+fn map_auth_write_error(error: rpi_model_runtime::CredentialStoreError) -> ConfigError {
+    match error {
+        rpi_model_runtime::CredentialStoreError::Io { path, source } => {
+            ConfigError::Write { path, source }
+        }
+        rpi_model_runtime::CredentialStoreError::Json { path, source } => {
+            ConfigError::Json { path, source }
+        }
     }
 }
 

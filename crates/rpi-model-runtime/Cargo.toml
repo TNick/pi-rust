@@ -20,3 +20,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 reqwest = { workspace = true }
 async-trait = { workspace = true }
+fs2 = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
