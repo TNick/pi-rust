@@ -110,19 +110,11 @@ impl Provider for OpenAiResponsesProvider {
         }
         let (mut producer, stream) = create_assistant_message_event_stream();
         let http = self.http.clone();
-        let has_protected_secret = request_secret.is_some();
-        let key = if has_protected_secret {
-            None
-        } else {
-            self.api_key.clone()
-        };
-        let allow_env_api_key = self.allow_env_api_key && !has_protected_secret;
+        let key = self.api_key.clone();
+        let allow_env_api_key = self.allow_env_api_key;
         let model = model.clone();
         let ctx = Arc::new(ctx.clone());
-        let mut opts = opts.clone();
-        if has_protected_secret {
-            opts.api_key = None;
-        }
+        let opts = opts.clone();
         tokio::spawn(async move {
             run_stream(
                 &mut producer,
@@ -135,6 +127,7 @@ impl Provider for OpenAiResponsesProvider {
                 None,
                 None,
                 None,
+                false,
             )
             .await;
         });
@@ -170,6 +163,7 @@ impl Provider for OpenAiResponsesProvider {
                 Some(callback),
                 None,
                 None,
+                false,
             )
             .await;
         });
@@ -353,6 +347,7 @@ impl OpenAiResponsesProvider {
                 callback,
                 Some((secret, bearer)),
                 None,
+                false,
                 false,
             )
             .await;
