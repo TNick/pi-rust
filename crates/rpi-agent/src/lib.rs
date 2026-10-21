@@ -29,8 +29,8 @@ pub mod types;
 pub use abort::AbortHandle;
 pub use agent::{Agent, AgentBuilder, AgentOptions};
 pub use agent_loop::{
-    run_agent_loop, run_agent_loop_continue, run_agent_loop_from_assistant, LoopOutcome,
-    NewMessages,
+    LoopOutcome, NewMessages, run_agent_loop, run_agent_loop_continue,
+    run_agent_loop_from_assistant,
 };
 pub use agent_tool::AgentTool;
 pub use error::AgentError;
@@ -42,7 +42,10 @@ pub use hooks::{
 };
 pub use message::{AgentMessage, AgentMessageRole, CustomMessage};
 pub use queue::PendingMessageQueue;
-pub use stream_fn::{stream_fn, ContinuationExtractor, ContinuationStreamFn, StreamFn};
+pub use stream_fn::{
+    CancellableContinuationStreamFn, ContinuationExtractor, ContinuationStreamFn, StreamFn,
+    stream_fn,
+};
 pub use types::{
     AfterToolCallContext, AfterToolCallResult, AgentContext, AgentLoopTurnUpdate, AgentState,
     AgentToolResult, BeforeToolCallContext, BeforeToolCallResult, QueueMode,

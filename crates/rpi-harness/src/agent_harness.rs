@@ -3868,6 +3868,7 @@ impl AgentHarness {
             provider_continuation: None,
             on_provider_continuation: None,
             continuation_stream_fn: None,
+            cancellable_continuation_stream_fn: None,
             continuation_extractor: None,
             convert_to_llm: convert,
             transform_context: snap.transform_context.clone(),

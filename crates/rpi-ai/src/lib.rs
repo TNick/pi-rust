@@ -34,8 +34,9 @@ pub use event_stream::{AssistantMessageEventStream, AssistantMessageEventStreamP
 pub use model::{Model, ProviderOptionsSchema, StreamingProtocolCompat};
 pub use provider::{
     AppliedRequestSettings, AppliedRequestSettingsCallback, CacheRetention, ContextPatch,
-    NoopProviderHooks, Provider, ProviderContinuation, ProviderHooks, RequestSecret,
-    SecretMaterial, SimpleStreamOptions, SimpleStreamOptionsPatch, DEFAULT_LLM_API_TIMEOUT,
+    DEFAULT_LLM_API_TIMEOUT, NoopProviderHooks, Provider, ProviderContinuation, ProviderHooks,
+    RequestSecret, SecretMaterial, SimpleStreamOptions, SimpleStreamOptionsPatch,
+    stream_provider_cancellable,
 };
 pub use schema::{validate_json_value, validate_tool_arguments};
 pub use types::{

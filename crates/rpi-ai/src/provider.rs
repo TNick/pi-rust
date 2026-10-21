@@ -3,7 +3,7 @@
 //! provider's wire format directly; it calls `stream_simple` and consumes the
 //! returned [`AssistantMessageEventStream`].
 
-use crate::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
+use crate::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
 use crate::model::Model;
 use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, DeferredHandle, ErrorReason, StopReason,
@@ -440,7 +440,7 @@ impl SimpleStreamOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{Provider, ProviderContinuation, SimpleStreamOptions, DEFAULT_LLM_API_TIMEOUT};
+    use super::{DEFAULT_LLM_API_TIMEOUT, Provider, ProviderContinuation, SimpleStreamOptions};
     use std::time::Duration;
 
     #[test]
@@ -750,6 +750,147 @@ pub(crate) fn continuation_error_stream(
     stream
 }
 
+/// Starts a provider stream with shared cancellation and terminal-event repair.
+///
+/// # Parameters
+/// - `provider`: Provider selected by the host.
+/// - `model`: Exact provider model authorized by the host.
+/// - `context`: Provider-neutral request context.
+/// - `options`: Non-secret stream options.
+/// - `request_secret`: Optional protected credential and bearer mode.
+/// - `applied_settings`: Optional sanitized applied-settings callback.
+/// - `continuation`: Optional provider/model-scoped continuation handle.
+/// - `continuation_enabled`: Whether the host opted into audited continuation.
+/// - `cancellation`: Cancellation signal for this provider request.
+///
+/// # Returns
+/// The provider assistant event stream. Cancellation and premature provider
+/// stream completion are represented as terminal events.
+pub fn stream_provider_cancellable(
+    provider: Arc<dyn Provider>,
+    model: Model,
+    context: Context,
+    mut options: SimpleStreamOptions,
+    request_secret: Option<(RequestSecret, bool)>,
+    applied_settings: Option<AppliedRequestSettingsCallback>,
+    continuation: Option<ProviderContinuation>,
+    continuation_enabled: bool,
+    cancellation: CancellationToken,
+) -> AssistantMessageEventStream {
+    let (mut producer, stream) = create_assistant_message_event_stream();
+    options.api_key = None;
+    options.signal = cancellation.clone();
+    tokio::spawn(async move {
+        let provider_id = provider.id().to_owned();
+        let api = model.api.clone();
+        let model_id = model.id.clone();
+        let call = async {
+            if continuation_enabled {
+                let callback = applied_settings.unwrap_or_else(|| Arc::new(|_| {}));
+                provider
+                    .stream_simple_with_continuation_and_applied_settings(
+                        &model,
+                        &context,
+                        continuation.as_ref(),
+                        &options,
+                        request_secret
+                            .as_ref()
+                            .map(|(secret, bearer)| (secret, *bearer)),
+                        callback,
+                    )
+                    .await
+            } else if continuation.is_some() {
+                continuation_error_stream(
+                    &model,
+                    &provider_id,
+                    "provider does not support response continuation",
+                )
+            } else {
+                match (request_secret, applied_settings) {
+                    (Some((secret, bearer)), Some(callback)) => {
+                        provider
+                            .stream_simple_with_request_secret_and_applied_settings(
+                                &model, &context, &options, &secret, bearer, callback,
+                            )
+                            .await
+                    }
+                    (Some((secret, bearer)), None) => {
+                        provider
+                            .stream_simple_with_request_secret(
+                                &model, &context, &options, &secret, bearer,
+                            )
+                            .await
+                    }
+                    (None, Some(callback)) => {
+                        provider
+                            .stream_simple_with_applied_settings(
+                                &model, &context, &options, callback,
+                            )
+                            .await
+                    }
+                    (None, None) => provider.stream_simple(&model, &context, &options).await,
+                }
+            }
+        };
+        let mut provider_stream = tokio::select! {
+            _ = cancellation.cancelled() => {
+                producer.push(AssistantMessageEvent::Error {
+                    reason: ErrorReason::Aborted,
+                    error: AssistantMessage::terminal(
+                        api,
+                        provider_id,
+                        model_id,
+                        StopReason::Aborted,
+                        "provider request cancelled",
+                        0,
+                    ),
+                });
+                return;
+            }
+            stream = call => stream,
+        };
+        let mut terminal = false;
+        loop {
+            let event = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    producer.push(AssistantMessageEvent::Error {
+                        reason: ErrorReason::Aborted,
+                        error: AssistantMessage::terminal(
+                            api.clone(),
+                            provider_id.clone(),
+                            model_id.clone(),
+                            StopReason::Aborted,
+                            "provider request cancelled",
+                            0,
+                        ),
+                    });
+                    return;
+                }
+                event = provider_stream.next() => event,
+            };
+            let Some(event) = event else { break };
+            terminal = event.is_terminal();
+            if !producer.push(event) || terminal {
+                return;
+            }
+        }
+        if !terminal {
+            producer.push(AssistantMessageEvent::Error {
+                reason: ErrorReason::Error,
+                error: AssistantMessage::terminal(
+                    api,
+                    provider_id,
+                    model_id,
+                    StopReason::Error,
+                    "provider stream ended without a terminal event",
+                    0,
+                ),
+            });
+        }
+    });
+    stream
+}
+
 /// Continue a response the provider deferred (a long-poll or batch API).
 ///
 /// Mirrors the optional `streamDeferred` / `cancelDeferred` on upstream's models
@@ -776,6 +917,93 @@ pub trait DeferredProvider: Send + Sync {
         _handle: &DeferredHandle,
     ) -> Result<(), String> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cancellable_stream_tests {
+    use super::*;
+    use crate::providers::faux::{FauxProvider, FauxScript};
+
+    struct SilentProvider {
+        models: Vec<Model>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SilentProvider {
+        fn id(&self) -> &str {
+            "silent"
+        }
+
+        fn models(&self) -> &[Model] {
+            &self.models
+        }
+
+        async fn stream_simple(
+            &self,
+            _model: &Model,
+            _context: &Context,
+            _options: &SimpleStreamOptions,
+        ) -> AssistantMessageEventStream {
+            let (_producer, stream) = create_assistant_message_event_stream();
+            stream
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_provider_stream_emits_one_terminal_abort() {
+        let provider = FauxProvider::new(FauxScript::new().with_text("hello"));
+        let model = provider.models()[0].clone();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut stream = stream_provider_cancellable(
+            provider,
+            model,
+            Context::default(),
+            SimpleStreamOptions::default(),
+            None,
+            None,
+            None,
+            false,
+            cancellation,
+        );
+
+        let event = stream.next().await.expect("abort event");
+        assert!(event.is_terminal());
+        assert!(matches!(
+            event,
+            AssistantMessageEvent::Error { error, .. }
+                if error.stop_reason == StopReason::Aborted
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unterminated_provider_stream_gets_terminal_error() {
+        let source = FauxProvider::new(FauxScript::new());
+        let provider = Arc::new(SilentProvider {
+            models: vec![source.models()[0].clone()],
+        });
+        let model = provider.models()[0].clone();
+        let mut stream = stream_provider_cancellable(
+            provider,
+            model,
+            Context::default(),
+            SimpleStreamOptions::default(),
+            None,
+            None,
+            None,
+            false,
+            CancellationToken::new(),
+        );
+
+        let event = stream.next().await.expect("repaired terminal event");
+        assert!(matches!(
+            event,
+            AssistantMessageEvent::Error { error, .. }
+                if error.stop_reason == StopReason::Error
+        ));
+        assert!(stream.next().await.is_none());
     }
 }
 

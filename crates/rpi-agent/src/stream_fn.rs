@@ -17,6 +17,7 @@ use rpi_ai::provider::{ProviderContinuation, SimpleStreamOptions};
 use rpi_ai::types::Context;
 use rpi_ai::{AssistantMessageEventStream, Model};
 use std::sync::{Arc, OnceLock};
+use tokio_util::sync::CancellationToken;
 
 /// The provider-boundary callable. Arc'd so `Agent`/`AgentLoopConfig` can clone
 /// it cheaply and pass it by reference into `run_agent_loop`.
@@ -40,6 +41,19 @@ pub type ContinuationStreamFn = Arc<
             &Context,
             &SimpleStreamOptions,
             Option<&ProviderContinuation>,
+        ) -> AssistantMessageEventStream
+        + Send
+        + Sync,
+>;
+
+/// Continuation-aware provider call that receives the active agent cancellation signal.
+pub type CancellableContinuationStreamFn = Arc<
+    dyn Fn(
+            &Model,
+            &Context,
+            &SimpleStreamOptions,
+            Option<&ProviderContinuation>,
+            CancellationToken,
         ) -> AssistantMessageEventStream
         + Send
         + Sync,
