@@ -5,6 +5,8 @@ use rpi_ai::model::{
 };
 use rpi_ai::{InputModality, Model, ModelCost, ThinkingLevel};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::ModelExecutionExclusion;
 
@@ -138,9 +140,12 @@ pub struct SafeSamplingParameters {
 /// - `model_id`: Provider-scoped model identifier.
 /// - `api_id`: Upstream provider API identifier.
 /// - `sampling_parameters`: Recognized typed numeric overrides.
+/// - `provider_options`: Schema-validated safe scalar provider properties.
 /// - `excluded_execution_fields`: Categories of omitted request configuration.
 /// - `excluded_sampling_parameter_count`: Number of unrecognized or malformed
 ///   sampling entries omitted without exposing their names or values.
+/// - `excluded_provider_option_count`: Number of provider-specific values
+///   omitted because their schema or value was not safe to preserve.
 /// - `complete`: Always false while any execution field is intentionally
 ///   outside this safe projection.
 ///
@@ -159,10 +164,14 @@ pub struct SafeModelExecutionConfiguration {
     pub api_id: String,
     /// Recognized typed numeric request overrides.
     pub sampling_parameters: SafeSamplingParameters,
+    /// Safe, schema-validated scalar provider properties.
+    pub provider_options: BTreeMap<String, Value>,
     /// Execution fields omitted from this partial projection.
     pub excluded_execution_fields: Vec<ModelExecutionExclusion>,
     /// Count of omitted sampling entries without their names or values.
     pub excluded_sampling_parameter_count: usize,
+    /// Count of provider properties omitted without their names or values.
+    pub excluded_provider_option_count: usize,
     /// Whether all request-affecting configuration is represented.
     pub complete: bool,
 }
@@ -246,9 +255,11 @@ pub fn safe_model_snapshot(model: &Model) -> SafeModelSnapshot {
 /// `frequency_penalty`, `presence_penalty`, `seed`, `max_tokens`, and
 /// `max_completion_tokens`. Other keys and non-numeric values are omitted and
 /// counted, without returning their names or contents. Endpoint URLs, headers,
-/// opaque provider options, provider-specific thinking labels, and opaque
-/// compatibility values are never included. The result is always incomplete
-/// and is not proof of the effective provider request.
+/// provider-specific thinking labels, and opaque compatibility values are
+/// never included. Provider options are included only when upstream schema
+/// inspection marks a scalar value safe; unsafe or unrecognized values are
+/// omitted. The result is always incomplete and is not proof of the effective
+/// provider request.
 ///
 /// # Parameters
 /// - `model`: Resolved upstream model descriptor.
@@ -301,6 +312,41 @@ pub fn safe_model_execution_configuration(model: &Model) -> SafeModelExecutionCo
         }
     }
 
+    let mut provider_options = BTreeMap::new();
+    if let Ok(descriptors) = crate::model_property_descriptors(model) {
+        for descriptor in descriptors {
+            if !descriptor.is_safe_for_generic_editor() {
+                continue;
+            }
+            let Some(value) = descriptor.value else {
+                continue;
+            };
+            let schema_type = descriptor.schema.get("type").and_then(Value::as_str);
+            let safe_scalar = match (schema_type, &value) {
+                (Some("boolean"), Value::Bool(_)) => true,
+                (Some("integer"), Value::Number(number)) => {
+                    number.as_i64().is_some() || number.as_u64().is_some()
+                }
+                (Some("number"), Value::Number(number)) => {
+                    number.as_f64().is_some_and(f64::is_finite)
+                }
+                (Some("string"), Value::String(text)) => descriptor
+                    .schema
+                    .get("enum")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| values.contains(&Value::String(text.clone()))),
+                _ => false,
+            };
+            if safe_scalar {
+                provider_options.insert(descriptor.key, value);
+            }
+        }
+    }
+    let excluded_provider_option_count = model
+        .provider_options
+        .len()
+        .saturating_sub(provider_options.len());
+
     let mut excluded_execution_fields = vec![ModelExecutionExclusion::Endpoint];
     if model
         .headers
@@ -309,7 +355,7 @@ pub fn safe_model_execution_configuration(model: &Model) -> SafeModelExecutionCo
     {
         excluded_execution_fields.push(ModelExecutionExclusion::Headers);
     }
-    if !model.provider_options.is_empty() {
+    if excluded_provider_option_count > 0 {
         excluded_execution_fields.push(ModelExecutionExclusion::ProviderOptions);
     }
     if excluded_sampling_parameter_count > 0 {
@@ -331,8 +377,10 @@ pub fn safe_model_execution_configuration(model: &Model) -> SafeModelExecutionCo
         model_id: model.id.clone(),
         api_id: model.api.as_str().to_owned(),
         sampling_parameters,
+        provider_options,
         excluded_execution_fields,
         excluded_sampling_parameter_count,
+        excluded_provider_option_count,
         complete: false,
     }
 }

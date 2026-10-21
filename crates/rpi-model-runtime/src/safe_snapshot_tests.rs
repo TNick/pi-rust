@@ -6,7 +6,7 @@ use rpi_ai::model::OpenaiCompletionsCompat;
 use rpi_ai::{Api, Model, StreamingProtocolCompat, ThinkingLevel};
 use serde_json::json;
 
-use super::{SafeModelCompatibility, safe_model_execution_configuration, safe_model_snapshot};
+use super::{safe_model_execution_configuration, safe_model_snapshot, SafeModelCompatibility};
 use crate::ModelExecutionExclusion as Exclusion;
 
 /// Builds a model containing useful public metadata.

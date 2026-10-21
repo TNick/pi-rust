@@ -31,7 +31,7 @@ pub struct ModelConfigurationFingerprint {
 /// # Public members
 /// - `Endpoint`: Endpoint strings are omitted because they are unvalidated.
 /// - `Headers`: Request headers may contain credentials.
-/// - `ProviderOptions`: Runtime-only options are opaque and may be sensitive.
+/// - `ProviderOptions`: Options omitted because schema does not prove safety.
 /// - `SamplingParams`: Arbitrary request values are not validated as public.
 /// - `ThinkingLevelMap`: Provider-specific values are unconstrained strings.
 /// - `OpaqueCompatibility`: Custom compatibility metadata is arbitrary JSON.
