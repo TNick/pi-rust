@@ -406,6 +406,31 @@ impl PluginToolAdapter {
         Self::new(registered.tool.clone(), registered.handle(), keepalive)
             .with_origin(registered.origin.clone())
     }
+
+    /// Builds a registered adapter with mandatory host pre-execution policy.
+    ///
+    /// This constructor keeps the registry origin attached while installing
+    /// the authorization callback in one operation, reducing the chance that
+    /// a host accidentally exposes a registered tool without its capability
+    /// check.
+    ///
+    /// # Parameters
+    /// - `registered`: Registry entry with its host-stamped origin.
+    /// - `keepalive`: Session library owner retained through every tool call.
+    /// - `authorization`: Host policy for the registered origin and arguments.
+    ///
+    /// # Returns
+    /// An adapter that checks host policy before executing extension code.
+    pub fn from_registered_authorized<F>(
+        registered: &ExtensionTool,
+        keepalive: Arc<PluginKeepalive>,
+        authorization: F,
+    ) -> Self
+    where
+        F: Fn(&ExtensionToolOrigin, &Value) -> bool + Send + Sync + 'static,
+    {
+        Self::from_registered(registered, keepalive).with_pre_execute_authorizer(authorization)
+    }
 }
 
 struct PartialCallbackContext {
