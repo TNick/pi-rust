@@ -10,6 +10,7 @@ use rpi_plugin_sdk::{
 };
 use std::{ffi::c_void, sync::Arc, time::Duration};
 
+pub mod native_packages;
 pub mod packages;
 
 pub type Factory = fn(&Model, &SimpleStreamOptions) -> Arc<dyn Provider>;
