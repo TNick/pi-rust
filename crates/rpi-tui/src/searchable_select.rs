@@ -271,10 +271,8 @@ mod tests {
     #[test]
     fn search_text_matches_label_and_provider_not_just_value() {
         // `search_text` is what enables matching a display name or provider.
-        let items = vec![
-            SelectItem::new("claude-sonnet-5", "Claude Sonnet 5")
-                .with_search_text("anthropic anthropic/claude-sonnet-5 Claude Sonnet 5"),
-        ];
+        let items = vec![SelectItem::new("claude-sonnet-5", "Claude Sonnet 5")
+            .with_search_text("anthropic anthropic/claude-sonnet-5 Claude Sonnet 5")];
         let widget = SearchableSelectList::new(None, None, Arc::new(SelectList::new(items, 10)));
         for ch in "anthropic".chars() {
             widget.handle_key(key(KeyCode::Char(ch)));

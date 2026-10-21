@@ -14,7 +14,7 @@ keywords = ["agent", "llm", "ai", "plugin", "ffi"]
 categories = ["api-bindings", "development-tools::ffi"]
 
 [dependencies]
-rpi-plugin-sdk = { workspace = true }
+rpi-plugin-sdk = { workspace = true, features = ["process"] }
 rpi-ai = { workspace = true }
 rpi-agent = { workspace = true }
 libloading = "0.8"

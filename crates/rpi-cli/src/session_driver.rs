@@ -115,7 +115,9 @@ pub fn map_agent_event(event: &AgentEvent) -> Option<UiEvent> {
             delay_ms: *delay_ms,
             error: error.clone(),
         }),
-        AgentEvent::TurnStart | AgentEvent::TurnEnd { .. } => None,
+        AgentEvent::TurnStart | AgentEvent::TurnEnd { .. } | AgentEvent::ProviderError { .. } => {
+            None
+        }
         AgentEvent::MessageStart { message } => match message {
             AgentMessage::Assistant(a) => Some(UiEvent::AssistantStart {
                 blocks: assistant_blocks(a),
@@ -427,7 +429,9 @@ pub fn map_remote_event(event: &RemoteEvent) -> Option<UiEvent> {
             result: result.clone(),
             is_error: *is_error,
         }),
-        RemoteEvent::TurnStart | RemoteEvent::TurnEnd { .. } => None,
+        RemoteEvent::TurnStart
+        | RemoteEvent::TurnEnd { .. }
+        | RemoteEvent::ProviderError { .. } => None,
     }
 }
 

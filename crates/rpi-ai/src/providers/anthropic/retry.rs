@@ -182,6 +182,9 @@ where
                 if retries_remaining == 0 {
                     return Err(err);
                 }
+                if !err.is_retryable() {
+                    return Err(err);
+                }
                 let req_err = ProviderRequestError::from(&err);
                 if !req_err.is_retryable() {
                     return Err(err);

@@ -53,6 +53,9 @@ pub enum RemoteEvent {
         delay_ms: u64,
         error: String,
     },
+    ProviderError {
+        reason: String,
+    },
     TurnStart,
     TurnEnd {
         message: Value,
@@ -127,6 +130,7 @@ impl RemoteEvent {
             RemoteEvent::AgentStart => "agent_start",
             RemoteEvent::AgentEnd { .. } => "agent_end",
             RemoteEvent::RetryScheduled { .. } => "retry_scheduled",
+            RemoteEvent::ProviderError { .. } => "provider_error",
             RemoteEvent::TurnStart => "turn_start",
             RemoteEvent::TurnEnd { .. } => "turn_end",
             RemoteEvent::MessageStart { .. } => "message_start",
@@ -163,6 +167,14 @@ impl RemoteEvent {
                 delay_ms: *delay_ms,
                 error: error.clone(),
             },
+            AgentEvent::ProviderError { reason } => RemoteEvent::ProviderError {
+                reason: match reason {
+                    rpi_ai::types::ErrorReason::Aborted => "aborted",
+                    rpi_ai::types::ErrorReason::Authentication => "authentication",
+                    rpi_ai::types::ErrorReason::Error => "error",
+                }
+                .to_owned(),
+            },
             AgentEvent::TurnStart => RemoteEvent::TurnStart,
             AgentEvent::TurnEnd {
                 message,
@@ -189,6 +201,11 @@ impl RemoteEvent {
                         ..
                     }
                     | AssistantMessageEvent::ThinkingDelta {
+                        content_index,
+                        delta,
+                        ..
+                    }
+                    | AssistantMessageEvent::ReasoningSummaryDelta {
                         content_index,
                         delta,
                         ..

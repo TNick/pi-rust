@@ -26,8 +26,8 @@ use crate::providers::anthropic::sse::SseEventStream;
 use crate::providers::{DELTA_FLUSH_BYTES, DELTA_FLUSH_INTERVAL};
 use crate::types::{
     Api, AssistantMessage, AssistantMessageEvent, Content, Context, DoneReason, ErrorReason,
-    InputModality, Message, StopReason, ThinkingContent, ThinkingContentType, ThinkingLevel,
-    ToolCall, ToolCallType, Usage, UserContent,
+    InputModality, Message, ThinkingContent, ThinkingContentType, ThinkingLevel, ToolCall,
+    ToolCallType, Usage, UserContent,
 };
 use crate::AiError;
 use zeroize::Zeroizing;
@@ -400,10 +400,7 @@ async fn run_stream(
                 } else {
                     let code = status.as_u16();
                     let message = response.text().await.unwrap_or_default();
-                    Err(AiError::Http {
-                        status: Some(code),
-                        message,
-                    })
+                    Err(AiError::from_http_status(code, message))
                 }
             }
         },
@@ -416,7 +413,7 @@ async fn run_stream(
     let response = match response {
         Ok(response) => response,
         Err(error) => {
-            state.error(producer, error.to_string(), error.is_abort());
+            state.error_with_reason(producer, error.to_string(), error.error_reason());
             return;
         }
     };
@@ -455,7 +452,7 @@ async fn run_stream(
                 return;
             }
             Err(error) => {
-                state.error(producer, error.to_string(), error.is_abort());
+                state.error_with_reason(producer, error.to_string(), error.error_reason());
                 return;
             }
         }
@@ -1223,21 +1220,36 @@ impl StreamState {
         message: String,
         aborted: bool,
     ) {
-        self.output.stop_reason = if aborted {
-            StopReason::Aborted
-        } else {
-            StopReason::Error
-        };
+        self.error_with_reason(
+            producer,
+            message,
+            if aborted {
+                ErrorReason::Aborted
+            } else {
+                ErrorReason::Error
+            },
+        );
+    }
+
+    /// Emits a terminal provider error with its typed classification.
+    ///
+    /// # Parameters
+    /// - `producer`: Stream receiving the terminal event.
+    /// - `message`: Safe error diagnostic.
+    /// - `reason`: Typed terminal failure reason.
+    fn error_with_reason(
+        &mut self,
+        producer: &mut AssistantMessageEventStreamProducer,
+        message: String,
+        reason: ErrorReason,
+    ) {
+        self.output.stop_reason = reason.into();
         self.output.error_message = Some(message);
         // Surface whatever streamed before the failure; the batched tail would
         // otherwise be lost from the delta stream.
         self.flush_pending(producer);
         producer.push(AssistantMessageEvent::Error {
-            reason: if aborted {
-                ErrorReason::Aborted
-            } else {
-                ErrorReason::Error
-            },
+            reason,
             error: self.output.clone(),
         });
     }

@@ -12,13 +12,13 @@ use std::time::{Duration, Instant};
 use super::component::Component;
 use super::container::Container;
 use super::layout::{
-    LayoutFrame, composite_tui_line, extract_cursor_position, render_layout_frame,
-    render_layout_frame_reusing_scroll_content,
+    composite_tui_line, extract_cursor_position, render_layout_frame,
+    render_layout_frame_reusing_scroll_content, LayoutFrame,
 };
 use super::overlay::OverlayManager;
 use super::scroll_view::ScrollView;
-use super::tui::{OverlayHandle, OverlayOptions, TUI, TuiMode, TuiStopOptions};
-use crate::ansi::{CURSOR_MARKER, visible_width};
+use super::tui::{OverlayHandle, OverlayOptions, TuiMode, TuiStopOptions, TUI};
+use crate::ansi::{visible_width, CURSOR_MARKER};
 use crate::terminal::{InputEvent, Terminal, TerminalInfo};
 
 /// Symbol for ViewportTUI capability check.
@@ -2010,13 +2010,12 @@ mod tests {
         tui.start_readerless();
         tui.scroll_by(-4);
         assert!(!scroll.is_following_end());
-        assert!(
-            tui.previous_screen
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|line| line.contains("Jump to latest"))
-        );
+        assert!(tui
+            .previous_screen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("Jump to latest")));
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 20,
@@ -2025,13 +2024,12 @@ mod tests {
         };
         assert!(tui.handle_scroll_to_end_indicator_mouse_event(&click));
         assert!(scroll.is_following_end());
-        assert!(
-            !tui.previous_screen
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|line| line.contains("Jump to latest"))
-        );
+        assert!(!tui
+            .previous_screen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("Jump to latest")));
         assert_eq!(editor.get_text(), "未发送的草稿");
         let focused: Arc<dyn Component> = editor.clone();
         assert!(Arc::ptr_eq(&tui.get_focus().unwrap(), &focused));
@@ -2046,13 +2044,12 @@ mod tests {
             scroll.scroll_top(),
             scroll.content_height() - scroll.viewport_height()
         );
-        assert!(
-            tui.previous_screen
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|line| line.contains("message 24"))
-        );
+        assert!(tui
+            .previous_screen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("message 24")));
         tui.stop(Default::default());
     }
 

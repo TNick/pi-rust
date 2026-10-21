@@ -218,6 +218,8 @@ pub struct AgentState {
     pub streaming_message: Option<std::sync::Arc<AssistantMessage>>,
     pub pending_tool_calls: HashSet<String>,
     pub error_message: Option<String>,
+    /// Typed category of the latest provider terminal error, when available.
+    pub provider_error_reason: Option<rpi_ai::types::ErrorReason>,
 }
 
 impl std::fmt::Debug for AgentState {
@@ -239,6 +241,7 @@ impl std::fmt::Debug for AgentState {
             .field("streaming_message", &self.streaming_message)
             .field("pending_tool_calls", &self.pending_tool_calls)
             .field("error_message", &self.error_message)
+            .field("provider_error_reason", &self.provider_error_reason)
             .finish()
     }
 }
@@ -255,6 +258,7 @@ impl Default for AgentState {
             streaming_message: None,
             pending_tool_calls: HashSet::new(),
             error_message: None,
+            provider_error_reason: None,
         }
     }
 }

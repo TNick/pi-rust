@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use rpi_ai::{AiError, Api, Model, validate_json_value};
+use rpi_ai::{validate_json_value, AiError, Api, Model};
 use serde_json::{Map, Value};
 use thiserror::Error;
 

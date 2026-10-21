@@ -413,7 +413,11 @@ impl Component for TreeList {
             .into_iter()
             .map(|row| {
                 let marker = if row.has_children {
-                    if row.expanded { "▾ " } else { "▸ " }
+                    if row.expanded {
+                        "▾ "
+                    } else {
+                        "▸ "
+                    }
                 } else {
                     "  "
                 };
@@ -686,15 +690,14 @@ mod tests {
         )
         .unwrap();
         assert!(tree.select("a"));
-        assert!(
-            tree.replace_items(vec![
+        assert!(tree
+            .replace_items(vec![
                 item("root", None),
                 item("a", Some("root")),
                 item("c", Some("root")),
                 item("other", None),
             ])
-            .is_ok()
-        );
+            .is_ok());
 
         assert_eq!(tree.selected_id().as_deref(), Some("a"));
         let rows = tree.visible_rows();
@@ -718,8 +721,8 @@ mod tests {
         assert!(tree.select("leaf"));
         assert!(tree.select("other"));
         assert!(tree.set_expanded("parent", false));
-        assert!(
-            tree.replace_items(vec![
+        assert!(tree
+            .replace_items(vec![
                 item("root", None),
                 item("parent", Some("root")),
                 item("leaf", Some("parent")),
@@ -727,8 +730,7 @@ mod tests {
                 item("new-parent", Some("root")),
                 item("new-leaf", Some("new-parent")),
             ])
-            .is_ok()
-        );
+            .is_ok());
 
         assert_eq!(tree.selected_id().as_deref(), Some("other"));
         let rows = tree.visible_rows();
@@ -752,10 +754,9 @@ mod tests {
     #[test]
     fn invalid_replacement_preserves_the_previous_tree() {
         let mut tree = TreeList::new(vec![item("a", None)], 8).unwrap();
-        assert!(
-            tree.replace_items(vec![item("a", None), item("a", None)])
-                .is_err()
-        );
+        assert!(tree
+            .replace_items(vec![item("a", None), item("a", None)])
+            .is_err());
 
         assert_eq!(tree.items().len(), 1);
         assert_eq!(tree.selected_id().as_deref(), Some("a"));

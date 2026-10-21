@@ -16,21 +16,21 @@
 
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::events::{AgentEmitter, AgentEvent, BroadcastEmitter};
-use crate::hooks::{AgentLoopConfig, ConvertToLlm, default_convert_to_llm_fn};
+use crate::hooks::{default_convert_to_llm_fn, AgentLoopConfig, ConvertToLlm};
 use crate::message::AgentMessage;
 use crate::queue::PendingMessageQueue;
 use crate::stream_fn::{
-    CancellableContinuationStreamFn, ContinuationExtractor, ContinuationStreamFn, StreamFn,
-    get_default_stream_fn,
+    get_default_stream_fn, CancellableContinuationStreamFn, ContinuationExtractor,
+    ContinuationStreamFn, StreamFn,
 };
 use crate::types::{AgentContext, AgentState, QueueMode, ToolExecutionMode};
 
-use rpi_ai::Model;
 use rpi_ai::provider::ProviderContinuation;
 use rpi_ai::types::{AssistantMessage, UserContent, UserMessage};
+use rpi_ai::Model;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 
 /// Options for constructing an [`Agent`]. Mirrors TS `AgentOptions`. Only
@@ -79,6 +79,7 @@ struct MutableAgentState {
     streaming_message: Option<Arc<AssistantMessage>>,
     pending_tool_calls: HashSet<String>,
     error_message: Option<String>,
+    provider_error_reason: Option<rpi_ai::types::ErrorReason>,
 }
 
 impl MutableAgentState {
@@ -93,12 +94,19 @@ impl MutableAgentState {
             streaming_message: self.streaming_message.clone(),
             pending_tool_calls: self.pending_tool_calls.clone(),
             error_message: self.error_message.clone(),
+            provider_error_reason: self.provider_error_reason,
         }
     }
 
     /// Reduce an event into state. Mirrors the switch in TS `processEvents`.
     fn reduce(&mut self, event: &AgentEvent) {
         match event {
+            AgentEvent::AgentStart => {
+                self.provider_error_reason = None;
+            }
+            AgentEvent::ProviderError { reason } => {
+                self.provider_error_reason = Some(*reason);
+            }
             AgentEvent::MessageStart { message } => {
                 // One clone per message (not per delta): the state holds the
                 // partial as a shared snapshot from here on.
@@ -334,6 +342,7 @@ impl AgentBuilder {
             streaming_message: None,
             pending_tool_calls: HashSet::new(),
             error_message: None,
+            provider_error_reason: None,
         };
 
         let (event_tx, _) = broadcast::channel(256);

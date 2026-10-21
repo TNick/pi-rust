@@ -3,7 +3,7 @@
 //! provider's wire format directly; it calls `stream_simple` and consumes the
 //! returned [`AssistantMessageEventStream`].
 
-use crate::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
+use crate::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 use crate::model::Model;
 use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, DeferredHandle, ErrorReason, StopReason,
@@ -440,7 +440,7 @@ impl SimpleStreamOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_LLM_API_TIMEOUT, Provider, ProviderContinuation, SimpleStreamOptions};
+    use super::{Provider, ProviderContinuation, SimpleStreamOptions, DEFAULT_LLM_API_TIMEOUT};
     use std::time::Duration;
 
     #[test]

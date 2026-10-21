@@ -8,6 +8,8 @@
 
 use std::fmt;
 
+use crate::types::ErrorReason;
+
 /// Every failure mode the `pi-ai` crate can surface.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AiError {
@@ -56,6 +58,42 @@ impl fmt::Display for AiError {
 impl std::error::Error for AiError {}
 
 impl AiError {
+    /// Creates an HTTP failure while classifying authorization responses.
+    ///
+    /// # Parameters
+    /// - `status`: HTTP response status.
+    /// - `message`: Safe provider response text.
+    ///
+    /// # Returns
+    /// An authentication error for HTTP 401/403, otherwise an HTTP error.
+    pub fn from_http_status(status: u16, message: impl Into<String>) -> Self {
+        let message = message.into();
+        if matches!(status, 401 | 403) {
+            Self::Auth { message }
+        } else {
+            Self::Http {
+                status: Some(status),
+                message,
+            }
+        }
+    }
+
+    /// Returns the typed terminal event classification for this failure.
+    ///
+    /// # Returns
+    /// Authentication, abort, or ordinary failure classification.
+    pub fn error_reason(&self) -> ErrorReason {
+        match self {
+            Self::Auth { .. } => ErrorReason::Authentication,
+            Self::Http {
+                status: Some(401 | 403),
+                ..
+            } => ErrorReason::Authentication,
+            Self::Abort { .. } => ErrorReason::Aborted,
+            _ => ErrorReason::Error,
+        }
+    }
+
     /// True if this error originated from cancellation (not a provider fault).
     pub fn is_abort(&self) -> bool {
         matches!(self, AiError::Abort { .. })

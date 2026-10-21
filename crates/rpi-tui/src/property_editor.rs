@@ -152,8 +152,14 @@ mod tests {
             value: "Fast".into(),
             description: None,
             choices: vec![
-                PropertyEditorChoice { label: "Fast".into(), value: "fast".into() },
-                PropertyEditorChoice { label: "Safe".into(), value: "safe".into() },
+                PropertyEditorChoice {
+                    label: "Fast".into(),
+                    value: "fast".into(),
+                },
+                PropertyEditorChoice {
+                    label: "Safe".into(),
+                    value: "safe".into(),
+                },
             ],
             selected_choice: Some("fast".into()),
         }]);
@@ -204,7 +210,10 @@ mod tests {
             *observed.lock().unwrap(),
             Some(("enabled".into(), "true".into()))
         );
-        assert!(editor.render(80).iter().any(|line| line.contains("Boolean true")));
+        assert!(editor
+            .render(80)
+            .iter()
+            .any(|line| line.contains("Boolean true")));
     }
 
     #[test]

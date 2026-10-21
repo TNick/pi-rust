@@ -495,15 +495,14 @@ async fn run_anthropic_stream(
                         _ = signal.cancelled() => return Err(AiError::Abort {
                             message: "Request aborted".to_string(),
                         }),
-                        result = resp.text() => result.map_err(|error| AiError::Http {
-                            status: Some(code),
-                            message: format!("error reading HTTP error body: {error}"),
+                        result = resp.text() => result.map_err(|error| {
+                            AiError::from_http_status(
+                                code,
+                                format!("error reading HTTP error body: {error}"),
+                            )
                         })?,
                     };
-                    return Err(AiError::Http {
-                        status: Some(code),
-                        message: text,
-                    });
+                    return Err(AiError::from_http_status(code, text));
                 }
                 Ok(resp)
             }
@@ -517,13 +516,13 @@ async fn run_anthropic_stream(
     let response = match response_result {
         Ok(r) => r,
         Err(err) => {
-            let aborted = err.is_abort();
+            let reason = err.error_reason();
             // Deliberately NO eprintln! here: in fullscreen TUI mode a raw
             // stderr write lands at the cursor (the input editor row), corrupting
             // the alt-screen. The error is propagated to the UI via
             // `emit_terminal_error` → `AssistantMessageEvent::Error`, which the
             // TUI renders as a `✗` line in the transcript.
-            emit_terminal_error(prod, &mut state, err.to_string(), aborted);
+            mapper::emit_terminal_error_with_reason(prod, &mut state, err.to_string(), reason);
             return;
         }
     };
@@ -541,8 +540,13 @@ async fn run_anthropic_stream(
         } {
             Ok(body) => body,
             Err(error) => {
-                let aborted = error.is_abort();
-                emit_terminal_error(prod, &mut state, error.to_string(), aborted);
+                let reason = error.error_reason();
+                mapper::emit_terminal_error_with_reason(
+                    prod,
+                    &mut state,
+                    error.to_string(),
+                    reason,
+                );
                 return;
             }
         };

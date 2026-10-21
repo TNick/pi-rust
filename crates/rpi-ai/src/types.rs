@@ -932,7 +932,8 @@ impl Context {
 ///
 /// Providers emit events in this order: `Start` is emitted once before any per-block
 /// events, then a `{Start,Delta*,End}` triple per content block (text / thinking /
-/// toolcall), then a terminal `Done` (carrying the final successful message) or
+/// toolcall), with provider-only `ReasoningSummaryDelta` events in wire order,
+/// then a terminal `Done` (carrying the final successful message) or
 /// `Error` (carrying a terminal message with `StopReason::Error`/`Aborted`).
 ///
 /// Every non-terminal event references the in-progress `AssistantMessage` via
@@ -962,6 +963,12 @@ pub enum AssistantMessageEvent {
         partial: std::sync::Arc<AssistantMessage>,
     },
     ThinkingDelta {
+        content_index: usize,
+        delta: String,
+        partial: std::sync::Arc<AssistantMessage>,
+    },
+    /// Provider supplied reasoning summary text, separate from raw thinking.
+    ReasoningSummaryDelta {
         content_index: usize,
         delta: String,
         partial: std::sync::Arc<AssistantMessage>,
@@ -1030,6 +1037,8 @@ impl From<DoneReason> for StopReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorReason {
     Aborted,
+    /// Provider authentication or authorization failed.
+    Authentication,
     Error,
 }
 
@@ -1037,6 +1046,8 @@ impl ErrorReason {
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorReason::Aborted => "aborted",
+            // Preserve the existing public event vocabulary.
+            ErrorReason::Authentication => "error",
             ErrorReason::Error => "error",
         }
     }
@@ -1046,6 +1057,7 @@ impl From<ErrorReason> for StopReason {
     fn from(r: ErrorReason) -> Self {
         match r {
             ErrorReason::Aborted => StopReason::Aborted,
+            ErrorReason::Authentication => StopReason::Error,
             ErrorReason::Error => StopReason::Error,
         }
     }
@@ -1061,6 +1073,7 @@ impl AssistantMessageEvent {
             AssistantMessageEvent::TextEnd { .. } => "text_end",
             AssistantMessageEvent::ThinkingStart { .. } => "thinking_start",
             AssistantMessageEvent::ThinkingDelta { .. } => "thinking_delta",
+            AssistantMessageEvent::ReasoningSummaryDelta { .. } => "reasoning_summary_delta",
             AssistantMessageEvent::ThinkingEnd { .. } => "thinking_end",
             AssistantMessageEvent::ToolCallStart { .. } => "toolcall_start",
             AssistantMessageEvent::ToolCallDelta { .. } => "toolcall_delta",
@@ -1088,6 +1101,7 @@ impl AssistantMessageEvent {
             | AssistantMessageEvent::TextEnd { partial, .. }
             | AssistantMessageEvent::ThinkingStart { partial, .. }
             | AssistantMessageEvent::ThinkingDelta { partial, .. }
+            | AssistantMessageEvent::ReasoningSummaryDelta { partial, .. }
             | AssistantMessageEvent::ThinkingEnd { partial, .. }
             | AssistantMessageEvent::ToolCallStart { partial, .. }
             | AssistantMessageEvent::ToolCallDelta { partial, .. }
@@ -1134,6 +1148,18 @@ impl Serialize for AssistantMessageEvent {
                 partial,
             }
             | AssistantMessageEvent::ThinkingDelta {
+                content_index,
+                delta,
+                partial,
+            } => {
+                let mut m = s.serialize_map(Some(4))?;
+                m.serialize_entry("type", tag)?;
+                m.serialize_entry("contentIndex", content_index)?;
+                m.serialize_entry("delta", delta)?;
+                m.serialize_entry("partial", &**partial)?;
+                m.end()
+            }
+            AssistantMessageEvent::ReasoningSummaryDelta {
                 content_index,
                 delta,
                 partial,

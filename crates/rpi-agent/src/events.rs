@@ -9,7 +9,7 @@
 //! tests compare event sequences via `Debug`. This avoids requiring
 //! `Deserialize` on `AssistantMessageEvent` (which is stream-protocol-only).
 
-use rpi_ai::types::{AssistantMessage, AssistantMessageEvent, ToolResultMessage};
+use rpi_ai::types::{AssistantMessage, AssistantMessageEvent, ErrorReason, ToolResultMessage};
 use std::sync::Arc;
 
 use crate::message::AgentMessage;
@@ -35,6 +35,11 @@ pub enum AgentEvent {
         delay_ms: u64,
         /// Diagnostic from the failed provider request.
         error: String,
+    },
+    /// Emitted when a provider response fails with a typed terminal reason.
+    ProviderError {
+        /// Typed provider failure category without response-body data.
+        reason: ErrorReason,
     },
     /// Emitted at the start of each turn (a turn = one assistant response + its
     /// tool calls/results).
@@ -93,6 +98,7 @@ impl AgentEvent {
             AgentEvent::AgentStart => "agent_start",
             AgentEvent::AgentEnd { .. } => "agent_end",
             AgentEvent::RetryScheduled { .. } => "retry_scheduled",
+            AgentEvent::ProviderError { .. } => "provider_error",
             AgentEvent::TurnStart => "turn_start",
             AgentEvent::TurnEnd { .. } => "turn_end",
             AgentEvent::MessageStart { .. } => "message_start",

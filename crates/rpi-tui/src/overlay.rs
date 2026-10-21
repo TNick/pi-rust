@@ -710,12 +710,10 @@ mod tests {
         for width in [12, 20, 60] {
             let overlay = render_overlay(&content, &options, width, 10).unwrap();
             assert_eq!(overlay.width, width / 2);
-            assert!(
-                overlay
-                    .lines
-                    .iter()
-                    .all(|row| visible_width(row) <= overlay.width)
-            );
+            assert!(overlay
+                .lines
+                .iter()
+                .all(|row| visible_width(row) <= overlay.width));
             assert!(overlay.x + overlay.width <= width);
             assert!(overlay.y + overlay.lines.len() <= 7);
             if width == 20 {

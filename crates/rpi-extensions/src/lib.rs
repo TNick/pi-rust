@@ -69,6 +69,7 @@ use rpi_plugin_sdk::{
 };
 use thiserror::Error;
 
+pub mod isolated;
 pub mod native_packages;
 pub mod packages;
 

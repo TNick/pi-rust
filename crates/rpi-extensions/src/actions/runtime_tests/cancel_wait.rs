@@ -71,7 +71,9 @@ async fn cancellation_sleeps_until_the_driver_returns_and_overrides_a_late_succe
         RELEASE.store(true, Ordering::Release);
         let result = task.await.unwrap();
         entered.unwrap();
-        assert!(wakes < 100 && result.is_err(),
-            "phase {phase}: cancelled adapter had {wakes} polls while blocked, then returned {result:?}; cancellation must sleep and must not become success");
+        assert!(
+            wakes < 100 && result.is_err(),
+            "phase {phase}: cancelled adapter had {wakes} polls while blocked, then returned {result:?}; cancellation must sleep and must not become success"
+        );
     }
 }

@@ -332,6 +332,8 @@ impl AssistantMessageFrameEncoder {
                 delta,
                 ..
             } => self.encode_text_delta(*content_index, delta, "text"),
+            // Provider summaries are transient metadata, not message content.
+            AssistantMessageEvent::ReasoningSummaryDelta { .. } => Ok(None),
             AssistantMessageEvent::TextEnd {
                 content_index,
                 content,

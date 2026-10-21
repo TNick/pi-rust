@@ -3,7 +3,7 @@
 use rpi_ai::Model;
 use rpi_extensions::ProviderManifest;
 
-use crate::{ConfigValueResolver, ModelCatalog, ModelCatalogSnapshot, ModelsConfig, build_catalog};
+use crate::{build_catalog, ConfigValueResolver, ModelCatalog, ModelCatalogSnapshot, ModelsConfig};
 
 impl ModelCatalog {
     /// Rebuilds and publishes models from caller-supplied provider configuration.

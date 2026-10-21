@@ -31,7 +31,7 @@ pub fn event_tag_for(event: &AgentEvent) -> Option<EventTag> {
     match event {
         AgentEvent::AgentStart => Some(EventTag::AgentStart),
         AgentEvent::AgentEnd { .. } => Some(EventTag::AgentEnd),
-        AgentEvent::RetryScheduled { .. } => None,
+        AgentEvent::RetryScheduled { .. } | AgentEvent::ProviderError { .. } => None,
         AgentEvent::TurnStart => Some(EventTag::TurnStart),
         AgentEvent::TurnEnd { .. } => Some(EventTag::TurnEnd),
         AgentEvent::MessageStart { .. } => Some(EventTag::MessageStart),
@@ -117,7 +117,7 @@ pub fn translate(event: &AgentEvent) -> Option<StablePluginEvent> {
         | AgentEvent::AgentEnd { .. }
         | AgentEvent::TurnEnd { .. } => Some(StablePluginEvent::empty(tag)),
 
-        AgentEvent::RetryScheduled { .. } => None,
+        AgentEvent::RetryScheduled { .. } | AgentEvent::ProviderError { .. } => None,
     }
 }
 
@@ -162,6 +162,15 @@ fn assistant_message_event_to_json(event: &rpi_ai::types::AssistantMessageEvent)
             ..
         } => serde_json::json!({
             "type": "thinking_delta",
+            "contentIndex": content_index,
+            "delta": delta,
+        }),
+        E::ReasoningSummaryDelta {
+            content_index,
+            delta,
+            ..
+        } => serde_json::json!({
+            "type": "reasoning_summary_delta",
             "contentIndex": content_index,
             "delta": delta,
         }),
@@ -213,6 +222,7 @@ fn event_type_name(event: &rpi_ai::types::AssistantMessageEvent) -> &'static str
         E::TextEnd { .. } => "text_end",
         E::ThinkingStart { .. } => "thinking_start",
         E::ThinkingDelta { .. } => "thinking_delta",
+        E::ReasoningSummaryDelta { .. } => "reasoning_summary_delta",
         E::ThinkingEnd { .. } => "thinking_end",
         E::ToolCallStart { .. } => "toolcall_start",
         E::ToolCallDelta { .. } => "toolcall_delta",

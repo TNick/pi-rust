@@ -840,20 +840,36 @@ pub fn emit_terminal_error(
     message: String,
     aborted: bool,
 ) {
-    state.output.stop_reason = if aborted {
-        StopReason::Aborted
-    } else {
-        StopReason::Error
-    };
+    emit_terminal_error_with_reason(
+        prod,
+        state,
+        message,
+        if aborted {
+            ErrorReason::Aborted
+        } else {
+            ErrorReason::Error
+        },
+    );
+}
+
+/// Emits a terminal failure preserving the upstream failure classification.
+///
+/// # Parameters
+/// - `prod`: Provider event producer.
+/// - `state`: Current Anthropic mapping state.
+/// - `message`: Safe failure diagnostic.
+/// - `reason`: Typed terminal failure classification.
+pub fn emit_terminal_error_with_reason(
+    prod: &mut AssistantMessageEventStreamProducer,
+    state: &mut MapperState,
+    message: String,
+    reason: ErrorReason,
+) {
+    state.output.stop_reason = reason.into();
     state.output.error_message = Some(message);
     // Surface whatever streamed before the failure; the batched tail would
     // otherwise be lost from the delta stream.
     state.flush_pending(prod);
-    let reason = if aborted {
-        ErrorReason::Aborted
-    } else {
-        ErrorReason::Error
-    };
     prod.push(AssistantMessageEvent::Error {
         reason,
         error: state.output.clone(),

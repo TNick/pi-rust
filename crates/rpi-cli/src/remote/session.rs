@@ -267,7 +267,9 @@ impl RemoteSession {
                     "retry {attempt}/{max_retries} in {delay_ms}ms: {error}"
                 ));
             }
-            RemoteEvent::TurnStart | RemoteEvent::TurnEnd { .. } => {}
+            RemoteEvent::TurnStart
+            | RemoteEvent::TurnEnd { .. }
+            | RemoteEvent::ProviderError { .. } => {}
             RemoteEvent::MessageStart { message } => {
                 match message_role(message) {
                     "assistant" => {

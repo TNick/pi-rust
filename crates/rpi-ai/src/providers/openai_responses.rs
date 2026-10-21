@@ -1507,12 +1507,12 @@ async fn run_stream(
             req = req.header(name, header);
         }
         let response = tokio::select! { r=req.send()=>r.map_err(|e| AiError::Http{status:None,message:e.to_string()})?, _=signal.cancelled()=>return Err(AiError::Abort{message:"Request aborted".into()})};
-        if response.status().is_success() { Ok(response) } else { let status=response.status().as_u16(); let msg=response.text().await.unwrap_or_default(); Err(AiError::Http{status:Some(status),message:msg}) }
+        if response.status().is_success() { Ok(response) } else { let status=response.status().as_u16(); let msg=response.text().await.unwrap_or_default(); Err(AiError::from_http_status(status, msg)) }
     }}, opts.max_retries, opts.max_retry_delay, &opts.signal).await;
     let response = match response {
         Ok(r) => r,
         Err(e) => {
-            emit_error(p, &mut out, e.to_string(), e.is_abort());
+            emit_error_with_reason(p, &mut out, e.to_string(), e.error_reason());
             return;
         }
     };
@@ -1614,7 +1614,21 @@ async fn run_stream(
                             }
                         }
                     }
-                    "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                    "response.reasoning_summary_text.delta" => {
+                        if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                            state.flush_pending(&mut out, p);
+                            p.push(AssistantMessageEvent::ReasoningSummaryDelta {
+                                content_index: value
+                                    .get("output_index")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0)
+                                    as usize,
+                                delta: delta.to_string(),
+                                partial: Arc::new(out.clone()),
+                            });
+                        }
+                    }
+                    "response.reasoning_text.delta" => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                             if let Some(index) = state.ensure_delta_slot(
                                 &value,
@@ -1795,7 +1809,7 @@ async fn run_stream(
                 return;
             }
             Err(e) => {
-                emit_error(p, &mut out, e.to_string(), e.is_abort());
+                emit_error_with_reason(p, &mut out, e.to_string(), e.error_reason());
                 return;
             }
         }
@@ -2740,18 +2754,35 @@ fn emit_error(
     msg: impl Into<String>,
     aborted: bool,
 ) {
-    out.stop_reason = if aborted {
-        StopReason::Aborted
-    } else {
-        StopReason::Error
-    };
-    out.error_message = Some(msg.into());
-    p.push(AssistantMessageEvent::Error {
-        reason: if aborted {
+    emit_error_with_reason(
+        p,
+        out,
+        msg,
+        if aborted {
             ErrorReason::Aborted
         } else {
             ErrorReason::Error
         },
+    );
+}
+
+/// Emits a terminal provider error with its typed classification.
+///
+/// # Parameters
+/// - `p`: Stream receiving the terminal event.
+/// - `out`: Assistant response being finalized.
+/// - `msg`: Safe error diagnostic.
+/// - `reason`: Typed terminal failure reason.
+fn emit_error_with_reason(
+    p: &mut AssistantMessageEventStreamProducer,
+    out: &mut AssistantMessage,
+    msg: impl Into<String>,
+    reason: ErrorReason,
+) {
+    out.stop_reason = reason.into();
+    out.error_message = Some(msg.into());
+    p.push(AssistantMessageEvent::Error {
+        reason,
         error: out.clone(),
     });
 }
@@ -3990,7 +4021,8 @@ mod tests {
             let _ = socket.read(&mut request).await;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
+                body.len(),
+                body
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });

@@ -35,8 +35,8 @@ use rpi_ai::types::{
     ToolResultMessage, ToolResultRole,
 };
 use rpi_ai::validate_tool_arguments;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// The messages a single `run_agent_loop` invocation added (prompt + assistant
 /// + tool results + injected steering/follow-ups). Returned to the caller.
@@ -512,6 +512,7 @@ async fn stream_assistant_response(
             | AssistantMessageEvent::TextEnd { partial, .. }
             | AssistantMessageEvent::ThinkingStart { partial, .. }
             | AssistantMessageEvent::ThinkingDelta { partial, .. }
+            | AssistantMessageEvent::ReasoningSummaryDelta { partial, .. }
             | AssistantMessageEvent::ThinkingEnd { partial, .. }
             | AssistantMessageEvent::ToolCallStart { partial, .. }
             | AssistantMessageEvent::ToolCallDelta { partial, .. }
@@ -536,7 +537,11 @@ async fn stream_assistant_response(
                     .await;
                 }
             }
-            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => {
+            terminal @ (AssistantMessageEvent::Done { .. }
+            | AssistantMessageEvent::Error { .. }) => {
+                if let AssistantMessageEvent::Error { reason, .. } = &terminal {
+                    emit_event(emit, AgentEvent::ProviderError { reason: *reason }).await;
+                }
                 let final_message = response.result().await.map_err(|_| {
                     AgentError::Provider(
                         "assistant-message event stream ended without a terminal event".into(),
