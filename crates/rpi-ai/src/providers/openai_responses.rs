@@ -348,7 +348,6 @@ impl OpenAiResponsesProvider {
                 Some((secret, bearer)),
                 None,
                 false,
-                false,
             )
             .await;
         });
