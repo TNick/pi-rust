@@ -504,6 +504,58 @@ pub enum ThemePreset {
     Monochrome,
 }
 
+impl ThemePreset {
+    /// All built-in theme presets in display order.
+    pub const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::Monochrome];
+
+    /// Return the stable identifier used by selectors and configuration.
+    ///
+    /// # Returns
+    /// A stable lowercase identifier.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::Monochrome => "monochrome",
+        }
+    }
+
+    /// Return the display label for this preset.
+    ///
+    /// # Returns
+    /// A human-readable preset name.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+            Self::Monochrome => "Monochrome",
+        }
+    }
+
+    /// Return the brief description shown in a preset selector.
+    ///
+    /// # Returns
+    /// A short user-facing description.
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Dark => "Default dark theme",
+            Self::Light => "Light background",
+            Self::Monochrome => "No color accents",
+        }
+    }
+
+    /// Resolve a stable identifier to a built-in preset.
+    ///
+    /// # Parameters
+    /// - `id`: Stable preset identifier.
+    ///
+    /// # Returns
+    /// The preset matching `id`, when one exists.
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|preset| preset.id() == id)
+    }
+}
+
 /// Global theme helper functions.
 pub fn theme() -> Theme {
     global_theme_manager().get()
