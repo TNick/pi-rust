@@ -588,8 +588,8 @@ async fn reload_updates_the_catalog_endpoint_and_runtime_without_a_restart() {
         );
         assert!(context
             .catalog
-            .read()
-            .unwrap()
+            .snapshot()
+            .models
             .iter()
             .any(|model| model.id == "second"));
         // `/provider` reads the current session declarations and combines them
@@ -609,8 +609,8 @@ async fn reload_updates_the_catalog_endpoint_and_runtime_without_a_restart() {
         );
         assert!(context
             .catalog
-            .read()
-            .unwrap()
+            .snapshot()
+            .models
             .iter()
             .all(|model| model.headers.is_none()));
         let provider = context
@@ -658,8 +658,8 @@ async fn reload_updates_the_catalog_endpoint_and_runtime_without_a_restart() {
     assert!(!before.is_active());
     let local = context
         .catalog
-        .read()
-        .unwrap()
+        .snapshot()
+        .models
         .iter()
         .find(|model| model.provider == "llama-cpp")
         .cloned();
@@ -684,8 +684,8 @@ async fn reload_updates_the_catalog_endpoint_and_runtime_without_a_restart() {
         context.args.api_key = None;
         let proxy = context
             .catalog
-            .read()
-            .unwrap()
+            .snapshot()
+            .models
             .iter()
             .find(|model| model.provider == "proxy" && model.id == "default")
             .cloned()

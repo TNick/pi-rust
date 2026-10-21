@@ -32,7 +32,7 @@ async fn real_subagent_plugin_inherits_project_tools_model_and_parent_approval_u
     let ctx = ToolCallContext::new(temp.path().to_string_lossy());
     ctx.set_session_id("default");
     let (host, cell) = rpi_cli::extensions_actions::HarnessActionHost::new_empty(
-        vec![],
+        rpi_model_runtime::ModelCatalog::new(),
         temp.path().into(),
         tokio::runtime::Handle::current(),
         BTreeMap::new(),
@@ -291,7 +291,7 @@ async fn real_subagent_plugin_inherits_project_tools_model_and_parent_approval_u
     // A second registration must not redirect the existing session. Then drop
     // the candidate exactly as a provider-resolution reload rollback does.
     let (other_host, _) = rpi_cli::extensions_actions::HarnessActionHost::new_empty(
-        vec![],
+        rpi_model_runtime::ModelCatalog::new(),
         std::env::temp_dir(),
         tokio::runtime::Handle::current(),
         BTreeMap::new(),

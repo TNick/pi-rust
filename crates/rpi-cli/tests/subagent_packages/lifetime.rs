@@ -10,7 +10,7 @@ async fn dropping_a_plugin_bound_harness_releases_its_provider_and_tool_keepaliv
     {
         let ctx = ToolCallContext::default();
         let (host, cell) = rpi_cli::extensions_actions::HarnessActionHost::new_empty(
-            vec![],
+            rpi_model_runtime::ModelCatalog::new(),
             std::env::temp_dir(),
             tokio::runtime::Handle::current(),
             BTreeMap::new(),

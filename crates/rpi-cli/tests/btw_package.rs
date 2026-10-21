@@ -22,7 +22,7 @@ async fn real_btw_command_is_owner_bound_and_never_writes_parent_history() {
     assert!(path.is_file());
     let temp = tempfile::tempdir().unwrap();
     let (host, cell) = rpi_cli::extensions_actions::HarnessActionHost::new_empty(
-        vec![],
+        rpi_model_runtime::ModelCatalog::new(),
         temp.path().into(),
         tokio::runtime::Handle::current(),
         BTreeMap::new(),

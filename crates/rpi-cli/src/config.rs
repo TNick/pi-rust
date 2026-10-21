@@ -1103,6 +1103,7 @@ mod tests {
                 input: None,
                 headers: None,
                 compat: None,
+                provider_options_schema: None,
                 provider_options: std::collections::BTreeMap::new(),
             }],
         };
@@ -1310,6 +1311,7 @@ mod tests {
                 input: None,
                 headers: None,
                 compat: None,
+                provider_options_schema: None,
                 provider_options: std::collections::BTreeMap::new(),
             }],
         };
