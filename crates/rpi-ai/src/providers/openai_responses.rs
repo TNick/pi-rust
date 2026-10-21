@@ -99,6 +99,9 @@ impl Provider for OpenAiResponsesProvider {
     fn models(&self) -> &[Model] {
         &self.models
     }
+    fn supports_response_continuation(&self) -> bool {
+        true
+    }
     async fn stream_simple(
         &self,
         model: &Model,

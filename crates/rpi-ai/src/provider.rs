@@ -516,6 +516,20 @@ pub trait Provider: Send + Sync {
     /// Models this provider serves.
     fn models(&self) -> &[Model];
 
+    /// Reports whether audited response continuation is supported.
+    ///
+    /// Hosts must check this capability before calling
+    /// `stream_simple_with_continuation_and_applied_settings` with `None`,
+    /// since that call opts into provider-side response retention. The default
+    /// is `false`; providers opt in only when they implement the audited
+    /// continuation path.
+    ///
+    /// # Returns
+    /// `true` when audited continuation requests are supported.
+    fn supports_response_continuation(&self) -> bool {
+        false
+    }
+
     /// Stream a single assistant turn against `ctx` on `model`. Returns the
     /// consumer end of an event stream; the producer task is already running.
     async fn stream_simple(
