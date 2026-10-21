@@ -1429,11 +1429,28 @@ impl TuiAltScreen {
     /// Resumes a panic from `should_stop` after stopping the TUI and restoring
     /// the terminal.
     pub fn run_until(self: &Arc<Self>, mut should_stop: impl FnMut() -> bool) {
+        self.run_until_with_tick(|| should_stop());
+    }
+
+    /// Run this TUI while polling a host-owned application tick.
+    ///
+    /// The upstream runtime owns terminal lifecycle, input dispatch, render
+    /// scheduling, and the cadence at which the host application is polled.
+    /// The host callback may drain application events and update semantic
+    /// presentation state; it returns `true` when the TUI should stop.
+    ///
+    /// # Parameters
+    /// - `on_tick`: Host application callback; returns `true` to stop.
+    ///
+    /// # Panics
+    /// Resumes a panic from `on_tick` after stopping the TUI and restoring the
+    /// terminal.
+    pub fn run_until_with_tick(self: &Arc<Self>, mut on_tick: impl FnMut() -> bool) {
         self.start_render_scheduler();
         self.start();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            while !should_stop() {
+            while !on_tick() {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }));
