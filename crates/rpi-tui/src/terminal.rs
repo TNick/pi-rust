@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyEvent, KeyEventKind, MouseEvent},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent},
     terminal as cterm,
 };
 use thiserror::Error;
@@ -412,6 +412,7 @@ impl Terminal for ProcessTerminal {
         let supports_kitty_keyboard = self.info().supports_kitty_keyboard;
 
         let reader = std::thread::spawn(move || {
+            let mut last_pressed_key: Option<(KeyCode, KeyModifiers)> = None;
             loop {
                 // Check if we're still running
                 if !running.load(Ordering::Acquire) {
@@ -423,17 +424,30 @@ impl Terminal for ProcessTerminal {
                     Ok(true) => {
                         if let Ok(event) = event::read() {
                             match event {
-                                Event::Key(key)
-                                    if key.kind == KeyEventKind::Release
-                                        && !matches!(
-                                            key.code,
-                                            crossterm::event::KeyCode::Enter
-                                                | crossterm::event::KeyCode::Char('\r')
-                                                | crossterm::event::KeyCode::Char('\n')
-                                        ) => {}
-                                Event::Key(key) => on_input(InputEvent::Key(
-                                    normalize_key_event_with_protocol(key, supports_kitty_keyboard),
-                                )),
+                                Event::Key(key) => {
+                                    if key.kind == KeyEventKind::Release {
+                                        let paired =
+                                            last_pressed_key == Some((key.code, key.modifiers));
+                                        if paired {
+                                            last_pressed_key = None;
+                                        } else {
+                                            on_input(InputEvent::Key(
+                                                normalize_key_event_with_protocol(
+                                                    key,
+                                                    supports_kitty_keyboard,
+                                                ),
+                                            ));
+                                        }
+                                    } else {
+                                        last_pressed_key = Some((key.code, key.modifiers));
+                                        on_input(InputEvent::Key(
+                                            normalize_key_event_with_protocol(
+                                                key,
+                                                supports_kitty_keyboard,
+                                            ),
+                                        ));
+                                    }
+                                }
                                 Event::Mouse(mouse) => on_input(InputEvent::Mouse(mouse)),
                                 Event::Paste(text) => on_input(InputEvent::Paste(text)),
                                 Event::Resize(cols, rows) => {
