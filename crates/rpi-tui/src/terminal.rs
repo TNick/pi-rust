@@ -428,6 +428,8 @@ impl Terminal for ProcessTerminal {
                                         && !matches!(
                                             key.code,
                                             crossterm::event::KeyCode::Enter
+                                                | crossterm::event::KeyCode::Char('\r')
+                                                | crossterm::event::KeyCode::Char('\n')
                                         ) => {}
                                 Event::Key(key) => on_input(InputEvent::Key(
                                     normalize_key_event_with_protocol(key, supports_kitty_keyboard),
