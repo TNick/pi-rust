@@ -606,7 +606,7 @@ impl Component for Dialog {
         lines.push(format!(
             "│ {} {}│",
             bold(&title),
-            " ".repeat(border_width.saturating_sub(4) - title.len())
+            " ".repeat(border_width.saturating_sub(4).saturating_sub(title.len()))
         ));
 
         // Separator
@@ -617,7 +617,11 @@ impl Component for Dialog {
             let padded = format!(
                 "│ {}{}",
                 line,
-                " ".repeat(border_width.saturating_sub(3) - visible_width(line))
+                " ".repeat(
+                    border_width
+                        .saturating_sub(3)
+                        .saturating_sub(visible_width(line))
+                )
             );
             lines.push(padded);
         }
@@ -634,8 +638,13 @@ impl Component for Dialog {
                 button_line.push_str(&format!("[{}] ", button));
             }
         }
-        button_line
-            .push_str(&" ".repeat(border_width.saturating_sub(3) - visible_width(&button_line)));
+        button_line.push_str(
+            &" ".repeat(
+                border_width
+                    .saturating_sub(3)
+                    .saturating_sub(visible_width(&button_line)),
+            ),
+        );
         button_line.push('│');
         lines.push(button_line);
 
