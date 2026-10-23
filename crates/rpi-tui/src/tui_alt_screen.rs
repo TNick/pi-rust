@@ -2093,6 +2093,8 @@ mod tests {
         }
         fn stop(&self) {
             self.write("<stop>");
+            // Model the real terminal's stop contract: stopping also exits raw mode.
+            self.exit_raw_mode();
         }
         fn is_tty(&self) -> bool {
             true
