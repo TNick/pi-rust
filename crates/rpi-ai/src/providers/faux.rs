@@ -8,10 +8,10 @@
 //! throttling, abort via `CancellationToken`, usage estimate, and error-on-empty.
 //! Deferred responses (long-poll) are out of scope for v1 — left as a TODO.
 
-use crate::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
+use crate::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
 use crate::model::Model;
 use crate::provider::{
-    reject_opaque_provider_options, DeferredProvider, Provider, SimpleStreamOptions,
+    DeferredProvider, Provider, SimpleStreamOptions, reject_opaque_provider_options,
 };
 use crate::types::{
     Api, AssistantMessage, AssistantMessageEvent, Content, Context, DeferredHandle, DoneReason,
@@ -198,6 +198,8 @@ pub enum FauxStep {
     Message(AssistantMessage),
     /// A dynamic factory evaluated at call time against a context snapshot.
     Factory(Arc<dyn Fn(&Context) -> AssistantMessage + Send + Sync>),
+    /// A dynamic factory retained for every request until the script is replaced.
+    RepeatingFactory(Arc<dyn Fn(&Context) -> AssistantMessage + Send + Sync>),
 }
 
 impl std::fmt::Debug for FauxStep {
@@ -205,6 +207,9 @@ impl std::fmt::Debug for FauxStep {
         match self {
             FauxStep::Message(m) => f.debug_tuple("Message").field(m).finish(),
             FauxStep::Factory(_) => f.debug_struct("Factory").finish_non_exhaustive(),
+            FauxStep::RepeatingFactory(_) => {
+                f.debug_struct("RepeatingFactory").finish_non_exhaustive()
+            }
         }
     }
 }
@@ -225,6 +230,25 @@ impl FauxStep {
         F: Fn(&Context) -> AssistantMessage + Send + Sync + 'static,
     {
         FauxStep::Factory(Arc::new(f))
+    }
+
+    /// Creates a context-driven factory that remains queued across requests.
+    ///
+    /// Unlike [`Self::factory`], this step is not removed when a provider
+    /// request consumes it. It is useful for deterministic scenarios that can
+    /// receive concurrent or unbounded model requests without replenishment
+    /// races.
+    ///
+    /// # Parameters
+    /// - `f`: Factory evaluated against each request context.
+    ///
+    /// # Returns
+    /// A repeating factory response step.
+    pub fn repeating_factory<F>(f: F) -> Self
+    where
+        F: Fn(&Context) -> AssistantMessage + Send + Sync + 'static,
+    {
+        FauxStep::RepeatingFactory(Arc::new(f))
     }
 }
 
@@ -313,6 +337,8 @@ impl FauxScript {
         let mut guard = self.steps.lock().unwrap();
         if guard.is_empty() {
             None
+        } else if matches!(guard.first(), Some(FauxStep::RepeatingFactory(_))) {
+            guard.first().cloned()
         } else {
             Some(guard.remove(0))
         }
@@ -516,6 +542,7 @@ impl Provider for FauxProvider {
                         let mut m = match s {
                             FauxStep::Message(m) => m,
                             FauxStep::Factory(f) => f(&ctx),
+                            FauxStep::RepeatingFactory(f) => f(&ctx),
                         };
                         m.api = model.api.clone();
                         m.provider = id.clone();

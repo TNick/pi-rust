@@ -213,6 +213,47 @@ async fn factory_step_sees_context() {
     assert_eq!(text, "echo:ping");
 }
 
+/// Keeps one context-aware factory available across concurrent-style requests.
+#[tokio::test]
+async fn repeating_factory_stays_queued_for_each_request() {
+    let script = FauxScript::new();
+    script.set_responses(vec![FauxStep::repeating_factory(|ctx: &Context| {
+        let last = ctx
+            .messages
+            .last()
+            .and_then(|message| match message {
+                Message::User(user) => match &user.content {
+                    UserContent::Text(text) => Some(text.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_default();
+        rpi_ai::providers::faux::faux_assistant_message(format!("echo:{last}"), StopReason::Stop)
+    })]);
+    let provider = FauxProvider::new(script.clone());
+    let model = provider.default_model().clone();
+
+    for prompt in ["first", "second"] {
+        let mut stream = provider
+            .stream_simple(&model, &ctx(prompt), &SimpleStreamOptions::default())
+            .await;
+        let _ = drain(&mut stream).await;
+        let result = stream.result().await.expect("factory response");
+        let text = result
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                Content::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(text, format!("echo:{prompt}"));
+        assert_eq!(script.pending_count(), 1);
+    }
+}
+
 #[test]
 fn faux_model_carryover() {
     // Sanity: the default model is a Faux-api model with a 128k window.
