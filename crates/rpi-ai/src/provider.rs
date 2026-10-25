@@ -129,23 +129,29 @@ pub(crate) fn reject_opaque_provider_options(
     Some(stream)
 }
 
-/// Publishes safe settings and an opaque digest of the final provider body.
+/// Publishes safe settings and opaque digests of the final provider request.
 ///
 /// Values are read from the body after provider transformation. Prompt and
-/// content fields, headers, credentials, arbitrary sampling values, and
-/// provider-specific opaque fields are never copied; the body contributes only
-/// a digest. The report remains incomplete because endpoint and transport
-/// header identity are omitted.
+/// content fields, arbitrary header values, credentials, arbitrary sampling
+/// values, and provider-specific opaque fields are never copied. The body
+/// contributes only a digest; a narrow set of fixed, non-sensitive header
+/// values contributes a separate digest. The report remains incomplete because
+/// endpoint and unclassified header identity are omitted.
 ///
 /// # Parameters
 /// - `model`: Model descriptor used to prepare the request.
 /// - `callback`: Optional sink for the report.
 /// - `body`: Final JSON request body immediately before transport.
-pub(crate) fn report_applied_request_settings(
+/// - `headers`: Final headers immediately before protected credentials are
+///   inserted by the transport bridge.
+pub(crate) fn report_applied_request_settings<'a, I>(
     model: &Model,
     callback: Option<&AppliedRequestSettingsCallback>,
     body: &serde_json::Value,
-) {
+    headers: I,
+) where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
     let Some(callback) = callback else {
         return;
     };
@@ -208,21 +214,50 @@ pub(crate) fn report_applied_request_settings(
             .map(|byte| format!("{byte:02x}"))
             .collect()
     });
+    let mut safe_headers = BTreeMap::new();
+    let mut unclassified_headers = false;
+    for (name, value) in headers {
+        let key = name.to_ascii_lowercase();
+        let safe_value = match key.as_str() {
+            "accept" if matches!(value, "application/json" | "text/event-stream") => Some(value),
+            "content-type" if value == "application/json" => Some(value),
+            "anthropic-version" if value == "2023-06-01" => Some(value),
+            "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key" => None,
+            _ => {
+                unclassified_headers = true;
+                None
+            }
+        };
+        if let Some(safe_value) = safe_value {
+            safe_headers.insert(key, safe_value.to_owned());
+        }
+    }
+    let request_header_sha256 = serde_json::to_vec(&safe_headers).ok().map(|bytes| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    });
+    let mut omitted_categories = vec![
+        "endpoint".to_owned(),
+        "headers_and_credentials".to_owned(),
+        "prompt_and_transcript".to_owned(),
+        "tools_and_schemas".to_owned(),
+        "opaque_provider_options".to_owned(),
+        "unrecognized_request_fields".to_owned(),
+    ];
+    if unclassified_headers {
+        omitted_categories.push("unclassified_headers".to_owned());
+    }
     callback(AppliedRequestSettings {
-        schema_version: "rpi-applied-request-settings-v2".to_owned(),
+        schema_version: "rpi-applied-request-settings-v3".to_owned(),
         provider_id: model.provider.clone(),
         model_id: model.id.clone(),
         api_id: model.api.as_str().to_owned(),
         applied_values,
         request_body_sha256,
-        omitted_categories: vec![
-            "endpoint".to_owned(),
-            "headers_and_credentials".to_owned(),
-            "prompt_and_transcript".to_owned(),
-            "tools_and_schemas".to_owned(),
-            "opaque_provider_options".to_owned(),
-            "unrecognized_request_fields".to_owned(),
-        ],
+        request_header_sha256,
+        omitted_categories,
         complete: false,
     });
 }
@@ -239,6 +274,7 @@ pub const DEFAULT_LLM_API_TIMEOUT: Duration = Duration::from_secs(600);
 /// - `api_id`: Provider API identifier.
 /// - `applied_values`: Allowlisted scalar settings found in the final body.
 /// - `request_body_sha256`: Digest of the exact prepared JSON body.
+/// - `request_header_sha256`: Digest of allowlisted prepared header values.
 /// - `omitted_categories`: Sensitive or opaque request categories omitted.
 /// - `complete`: Whether every request-affecting setting is represented.
 ///
@@ -260,6 +296,9 @@ pub struct AppliedRequestSettings {
     /// SHA-256 identity of the exact prepared JSON body, without storing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_sha256: Option<String>,
+    /// SHA-256 identity of exact allowlisted, non-sensitive header values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_header_sha256: Option<String>,
     /// Omitted request categories that may contain secrets or opaque data.
     pub omitted_categories: Vec<String>,
     /// Whether the report attests every request-affecting value.
@@ -488,11 +527,21 @@ mod tests {
             "input": "different private prompt"
         });
 
-        report_applied_request_settings(&model, Some(&callback), &first_body);
-        report_applied_request_settings(&model, Some(&callback), &second_body);
+        report_applied_request_settings(
+            &model,
+            Some(&callback),
+            &first_body,
+            [("content-type", "application/json")],
+        );
+        report_applied_request_settings(
+            &model,
+            Some(&callback),
+            &second_body,
+            [("accept", "text/event-stream")],
+        );
 
         let reports = reports.lock().unwrap();
-        assert_eq!(reports[0].schema_version, "rpi-applied-request-settings-v2");
+        assert_eq!(reports[0].schema_version, "rpi-applied-request-settings-v3");
         let first_digest = reports[0]
             .request_body_sha256
             .as_deref()
@@ -503,9 +552,56 @@ mod tests {
             .expect("prepared body digest");
         assert_eq!(first_digest.len(), 64);
         assert_ne!(first_digest, second_digest);
+        let first_headers = reports[0]
+            .request_header_sha256
+            .as_deref()
+            .expect("allowlisted header digest");
+        let second_headers = reports[1]
+            .request_header_sha256
+            .as_deref()
+            .expect("allowlisted header digest");
+        assert_ne!(first_headers, second_headers);
         let encoded = serde_json::to_string(&reports[0]).expect("report JSON");
         assert!(!encoded.contains("private prompt sentinel"));
         assert!(!reports[0].complete);
+    }
+
+    #[test]
+    fn prepared_header_digest_omits_credentials_and_unclassified_values() {
+        let model = Model::new(
+            "model-a",
+            "Model A",
+            Api::OpenaiCompletions,
+            "provider-a",
+            "https://example.invalid/v1",
+        );
+        let reports = Arc::new(Mutex::new(Vec::<AppliedRequestSettings>::new()));
+        let sink = Arc::clone(&reports);
+        let callback: AppliedRequestSettingsCallback =
+            Arc::new(move |report| sink.lock().unwrap().push(report));
+        let body = json!({"model": "model-a"});
+        report_applied_request_settings(
+            &model,
+            Some(&callback),
+            &body,
+            [
+                ("content-type", "application/json"),
+                ("authorization", "Bearer private-header-sentinel"),
+                ("x-custom", "private-custom-sentinel"),
+            ],
+        );
+
+        let reports = reports.lock().unwrap();
+        let report = &reports[0];
+        let encoded = serde_json::to_string(report).expect("report JSON");
+        assert!(!encoded.contains("private-header-sentinel"));
+        assert!(!encoded.contains("private-custom-sentinel"));
+        assert!(
+            report
+                .omitted_categories
+                .contains(&"unclassified_headers".to_owned())
+        );
+        assert!(!report.complete);
     }
 
     #[test]

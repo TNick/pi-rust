@@ -392,6 +392,7 @@ fn incomplete_applied_settings_report(model: &Model) -> AppliedRequestSettings {
         api_id: model.api.as_str().to_owned(),
         applied_values: Default::default(),
         request_body_sha256: None,
+        request_header_sha256: None,
         omitted_categories: vec![
             "extension_managed_request_transforms".to_owned(),
             "provider_applied_values_unavailable".to_owned(),
@@ -1169,6 +1170,7 @@ fn normalize_extension_report(
         "apiId",
         "appliedValues",
         "requestBodySha256",
+        "requestHeaderSha256",
         "omittedCategories",
         "complete",
     ];
@@ -1176,9 +1178,13 @@ fn normalize_extension_report(
     if object.keys().any(|key| !FIELDS.contains(&key.as_str()))
         || !matches!(
             schema,
-            "rpi-applied-request-settings-v1" | "rpi-applied-request-settings-v2"
+            "rpi-applied-request-settings-v1"
+                | "rpi-applied-request-settings-v2"
+                | "rpi-applied-request-settings-v3"
         )
         || (schema == "rpi-applied-request-settings-v1" && object.contains_key("requestBodySha256"))
+        || (schema != "rpi-applied-request-settings-v3"
+            && object.contains_key("requestHeaderSha256"))
     {
         return None;
     }
@@ -1188,10 +1194,17 @@ fn normalize_extension_report(
     }) {
         return None;
     }
+    if report.request_header_sha256.as_ref().is_some_and(|digest| {
+        digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return None;
+    }
     if report.provider_id != model.provider
         || report.model_id != model.id
         || report.api_id != model.api.as_str()
         || (schema == "rpi-applied-request-settings-v2" && report.request_body_sha256.is_none())
+        || (schema == "rpi-applied-request-settings-v3"
+            && (report.request_body_sha256.is_none() || report.request_header_sha256.is_none()))
     {
         return None;
     }
@@ -2154,6 +2167,34 @@ mod tests {
 
         let mut malformed = report;
         malformed["requestBodySha256"] = serde_json::json!("not-a-digest");
+        assert!(normalize_extension_report(&malformed, &model).is_none());
+    }
+
+    /// Requires valid body and safe-header digests for version-three reports.
+    #[test]
+    fn extension_applied_settings_v3_requires_valid_digests() {
+        let model = Model::new(
+            "model-a",
+            "Model A",
+            rpi_ai::types::Api::OpenaiCompletions,
+            "provider-a",
+            "https://example.test",
+        );
+        let base = serde_json::json!({
+            "schemaVersion": "rpi-applied-request-settings-v3",
+            "providerId": "provider-a",
+            "modelId": "model-a",
+            "apiId": "openai-completions",
+            "appliedValues": {},
+            "requestBodySha256": "a".repeat(64),
+            "requestHeaderSha256": "b".repeat(64),
+            "omittedCategories": ["headers_and_credentials"],
+            "complete": false
+        });
+        assert!(normalize_extension_report(&base, &model).is_some());
+
+        let mut malformed = base;
+        malformed["requestHeaderSha256"] = serde_json::json!("invalid");
         assert!(normalize_extension_report(&malformed, &model).is_none());
     }
 

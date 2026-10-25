@@ -1359,10 +1359,11 @@ pub type ProviderHeadersFn = extern "C" fn(
 
 /// Accepts a borrowed JSON applied-settings report for the active request.
 ///
-/// The report must use `rpi-applied-request-settings-v1`. The host checks
-/// request identity and retains only allowlisted settings. The host cannot
-/// independently verify an extension's final HTTP body, so accepted reports
-/// remain incomplete. The borrowed bytes are valid only for the call.
+/// The report may use version 1, 2, or 3. Version 2 adds the final body digest;
+/// version 3 also adds a digest of allowlisted non-sensitive header values.
+/// The host checks request identity and retains only allowlisted settings. It
+/// cannot independently verify an extension's final HTTP request, so accepted
+/// reports remain incomplete. The borrowed bytes are valid only for the call.
 ///
 /// # Parameters
 /// - `report_json`: Borrowed serialized `AppliedRequestSettings` value.

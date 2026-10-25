@@ -1,14 +1,14 @@
 //! OpenAI Responses API provider (`/v1/responses`).
 
+use crate::AiError;
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEventStream,
-    AssistantMessageEventStreamProducer,
+    AssistantMessageEventStream, AssistantMessageEventStreamProducer,
+    create_assistant_message_event_stream,
 };
 use crate::model::{Model, StreamingProtocolCompat};
 use crate::provider::{
-    reject_opaque_provider_options, report_applied_request_settings,
     AppliedRequestSettingsCallback, Provider, ProviderContinuation, RequestSecret,
-    SimpleStreamOptions,
+    SimpleStreamOptions, reject_opaque_provider_options, report_applied_request_settings,
 };
 use crate::providers::anthropic::cost::calculate_cost;
 use crate::providers::anthropic::json_parse::parse_streaming_json;
@@ -21,9 +21,8 @@ use crate::types::{
     DoneReason, ErrorReason, ImageContent, InputModality, Message, StopReason, ThinkingLevel, Tool,
     ToolCall, ToolCallType, Usage, UserContent,
 };
-use crate::AiError;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -1474,8 +1473,15 @@ async fn run_stream(
     } else {
         build_request(model, ctx, opts)
     };
-    report_applied_request_settings(model, applied_settings_callback.as_ref(), &body);
     let url = responses_url(&model.base_url);
+    report_applied_request_settings(
+        model,
+        applied_settings_callback.as_ref(),
+        &body,
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    );
     let timeout = opts.request_timeout();
     let signal = opts.signal.clone();
     let response = retry_provider_request(move || { let http=http.clone(); let url=url.clone(); let body=body.clone(); let headers=headers.clone(); let signal=signal.clone(); let protected_secret=protected_secret.clone(); async move {
@@ -2934,9 +2940,11 @@ mod tests {
             headers.get("authorization").map(String::as_str),
             Some("Bearer gateway-key")
         );
-        assert!(headers
-            .values()
-            .all(|value| value != "Bearer official-openai-key"));
+        assert!(
+            headers
+                .values()
+                .all(|value| value != "Bearer official-openai-key")
+        );
     }
 
     #[test]
@@ -3320,9 +3328,11 @@ mod tests {
             tool_result("call_aborted|fc_aborted"),
         ]);
         let body = build_request(&model(), &context, &SimpleStreamOptions::default());
-        assert!(body["input"]
-            .as_array()
-            .is_some_and(|items| items.is_empty()));
+        assert!(
+            body["input"]
+                .as_array()
+                .is_some_and(|items| items.is_empty())
+        );
     }
 
     #[test]
@@ -3812,10 +3822,12 @@ mod tests {
         let Content::Thinking(thinking) = &output.content[0] else {
             panic!("expected thinking content");
         };
-        assert!(thinking
-            .thinking_signature
-            .as_deref()
-            .is_some_and(|value| value.contains("encrypted_content")));
+        assert!(
+            thinking
+                .thinking_signature
+                .as_deref()
+                .is_some_and(|value| value.contains("encrypted_content"))
+        );
     }
 
     #[test]
@@ -3878,9 +3890,11 @@ mod tests {
             &Context::new(vec![Message::Assistant(Box::new(assistant))]),
             &SimpleStreamOptions::default(),
         );
-        assert!(body["input"]
-            .as_array()
-            .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")));
+        assert!(
+            body["input"]
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning"))
+        );
     }
 
     #[test]
@@ -3942,10 +3956,12 @@ mod tests {
         );
         let result = futures::executor::block_on(stream.result()).unwrap();
         assert_eq!(result.stop_reason, StopReason::Error);
-        assert!(result
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("cancelled")));
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("cancelled"))
+        );
     }
 
     #[test]
@@ -4047,10 +4063,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.stop_reason, StopReason::Error);
-        assert!(result
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("invalid OpenAI Responses SSE event")));
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("invalid OpenAI Responses SSE event"))
+        );
         server.await.unwrap();
     }
 
