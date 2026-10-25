@@ -222,6 +222,41 @@ impl TreeList {
         true
     }
 
+    /// Changes expansion state for several parent IDs with one visible-row rebuild.
+    ///
+    /// This is useful when a caller initializes or reveals a large subtree. It
+    /// avoids rebuilding the complete visible preorder once for each parent.
+    /// Unknown IDs and leaf IDs are ignored.
+    ///
+    /// # Parameters
+    /// - `ids`: Parent identities whose expansion state should change.
+    /// - `expanded`: Whether each parent should expose its children.
+    ///
+    /// # Returns
+    /// The number of parent expansion states that changed.
+    pub fn set_expanded_many(&self, ids: &[String], expanded: bool) -> usize {
+        let Ok(mut state) = self.state.lock() else {
+            return 0;
+        };
+        let mut changed = 0;
+        for id in ids {
+            if !self.has_children(id) {
+                continue;
+            }
+            let did_change = if expanded {
+                state.expanded.insert(id.clone())
+            } else {
+                state.expanded.remove(id)
+            };
+            changed += usize::from(did_change);
+        }
+        if changed > 0 {
+            self.rebuild_visible(&mut state);
+            self.keep_selection_visible(&mut state);
+        }
+        changed
+    }
+
     /// Toggles expansion for the currently selected parent item.
     pub fn toggle_selected_expansion(&self) -> bool {
         let Some(id) = self.selected_id() else {
@@ -535,35 +570,51 @@ fn build_indexes(
             .push(item.id.clone());
     }
 
-    let mut depths = HashMap::new();
-    for item in items {
-        let depth = item_depth(item, &item_index, items)?;
-        depths.insert(item.id.clone(), depth);
-    }
+    let depths = item_depths(items, &item_index)?;
     Ok((item_index, children, depths))
 }
 
-/// Computes a checked depth for one item and rejects parent cycles.
-fn item_depth(
-    item: &TreeItem,
-    item_index: &HashMap<String, usize>,
+/// Computes all checked item depths in linear time and rejects parent cycles.
+fn item_depths(
     items: &[TreeItem],
-) -> Result<usize, String> {
-    let mut depth = 0;
-    let mut current = item.parent_id.as_deref();
-    let mut visited = HashSet::new();
-    visited.insert(item.id.as_str());
-    while let Some(parent) = current {
-        if !visited.insert(parent) {
-            return Err(format!("tree item parent cycle includes `{parent}`"));
+    item_index: &HashMap<String, usize>,
+) -> Result<HashMap<String, usize>, String> {
+    let mut depths = HashMap::with_capacity(items.len());
+    for item in items {
+        if depths.contains_key(&item.id) {
+            continue;
         }
-        let index = item_index
-            .get(parent)
-            .ok_or_else(|| format!("tree item `{}` has missing parent `{parent}`", item.id))?;
-        depth += 1;
-        current = items[*index].parent_id.as_deref();
+        let mut path = Vec::new();
+        let mut visiting = HashSet::new();
+        let mut current = item;
+        let mut depth: usize = loop {
+            if let Some(depth) = depths.get(&current.id) {
+                break *depth;
+            }
+            if !visiting.insert(current.id.as_str()) {
+                return Err(format!("tree item parent cycle includes `{}`", current.id));
+            }
+            path.push(current);
+            let Some(parent) = current.parent_id.as_deref() else {
+                break 0;
+            };
+            let index = item_index.get(parent).ok_or_else(|| {
+                format!("tree item `{}` has missing parent `{parent}`", current.id)
+            })?;
+            current = &items[*index];
+        };
+        for item in path.into_iter().rev() {
+            if item.parent_id.is_some() {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| "tree nesting exceeds supported depth".to_owned())?;
+            } else {
+                depth = 0;
+            }
+            depths.insert(item.id.clone(), depth);
+        }
     }
-    Ok(depth)
+    Ok(depths)
 }
 
 /// Keeps the selected row visible and clamps the viewport to valid bounds.
@@ -618,6 +669,38 @@ mod tests {
         assert_eq!(tree.visible_rows()[2].id, "leaf");
     }
 
+    /// Applies a batch of parent expansion changes and retains valid selection.
+    #[test]
+    fn batch_expansion_updates_all_parents_before_rebuilding_visible_rows() {
+        let tree = TreeList::new(
+            vec![
+                item("root", None),
+                item("first", Some("root")),
+                item("leaf", Some("first")),
+                item("second", Some("root")),
+                item("other-leaf", Some("second")),
+            ],
+            8,
+        )
+        .unwrap();
+        let parents = vec![
+            "first".to_owned(),
+            "second".to_owned(),
+            "missing".to_owned(),
+        ];
+
+        assert_eq!(tree.set_expanded_many(&parents, true), 2);
+        assert_eq!(
+            tree.visible_rows()
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root", "first", "leaf", "second", "other-leaf"]
+        );
+        assert_eq!(tree.set_expanded_many(&parents, false), 2);
+        assert_eq!(tree.visible_rows().len(), 3);
+    }
+
     /// Collapse hides descendants and moves selection to the collapsed parent.
     #[test]
     fn collapse_keeps_selection_on_a_visible_row() {
@@ -647,7 +730,8 @@ mod tests {
     /// Renders a deep tree without recursively traversing its expanded path.
     #[test]
     fn deep_tree_uses_cached_visible_rows_and_bounded_rendering() {
-        let items = (0..4096)
+        let size = 4096;
+        let items = (0..size)
             .map(|index| {
                 let id = format!("node-{index}");
                 let parent_id = (index > 0).then(|| format!("node-{}", index - 1));
@@ -659,12 +743,20 @@ mod tests {
             })
             .collect();
         let tree = TreeList::new(items, 16).unwrap();
+        let parents = (0..size - 1)
+            .map(|index| format!("node-{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(tree.set_expanded_many(&parents, true), size - 2);
 
-        assert!(tree.select("node-4095"));
+        assert!(tree.select(&format!("node-{}", size - 1)));
 
         let rows = tree.visible_rows();
         assert_eq!(rows.len(), 16);
-        assert_eq!(rows.last().map(|row| row.id.as_str()), Some("node-4095"));
+        assert_eq!(
+            rows.last().map(|row| row.id.as_str()),
+            Some(format!("node-{}", size - 1).as_str())
+        );
+        assert_eq!(rows.last().map(|row| row.depth), Some(size - 1));
         assert!(rows.last().is_some_and(|row| row.selected));
     }
 
