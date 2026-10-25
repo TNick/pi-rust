@@ -8,9 +8,14 @@ struct Host {
     calls: AtomicUsize,
     revoked: AtomicUsize,
     side_sinks: std::sync::Mutex<Vec<SideQuestionSink>>,
+    components: std::sync::Mutex<Vec<(u64, Value)>>,
 }
 #[async_trait::async_trait]
 impl RuntimeActionHost for Host {
+    async fn ui_component(&self, owner: u64, args: Value) -> Result<Value, String> {
+        self.components.lock().unwrap().push((owner, args));
+        Ok(json!({"ok":true}))
+    }
     async fn side_question(
         &self,
         owner: u64,
@@ -86,6 +91,29 @@ impl RuntimeActionHost for Host {
         self.revoked.fetch_add(1, Ordering::SeqCst);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_ui_component_actions_relay_to_the_host_with_plugin_owner() {
+    let host = Arc::new(Host::default());
+    let root = ActionBridge::new(Handle::current(), host.clone()).with_remote_ui_components();
+    let plugin = root.for_plugin("monitor");
+    let mut out = StbString::empty();
+    let rc = trampoline_runtime_action(
+        RuntimeActionId::UiComponent.into(),
+        StbStringRef::from_str(r#"{"op":"register","id":"monitor","type":"text"}"#),
+        &mut out,
+        plugin.user_data(),
+    );
+    let response = unsafe {
+        rpi_plugin_sdk::callbacks::OwnedString::from_raw(out, Some(crate::host_free_string))
+    };
+    assert_eq!(rc, 0, "{}", response.to_string_lossy());
+    let calls = host.components.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, plugin.plugin_identity.as_ref().unwrap().0);
+    assert_eq!(calls[0].1["id"], "monitor");
+}
+
 fn call(id: usize, args: Value) -> (i32, Value) {
     let mut out = StbString::empty();
     let text = args.to_string();

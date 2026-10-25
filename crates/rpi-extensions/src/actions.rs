@@ -422,6 +422,25 @@ pub trait RuntimeActionHost: Send + Sync {
         Err("host capability calls are not supported by this host".into())
     }
 
+    /// Publishes a plugin-owned UI component through the isolated host bridge.
+    ///
+    /// # Parameters
+    /// - `owner`: Plugin identity assigned by the worker runtime.
+    /// - `args`: Validated component lifecycle operation.
+    ///
+    /// # Returns
+    /// The host mailbox result.
+    ///
+    /// # Errors
+    /// Returns a denial when the host does not support remote components.
+    async fn ui_component(
+        &self,
+        _owner: u64,
+        _args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Err("remote UI components are not supported by this host".into())
+    }
+
     /// Refresh the host-side model selector after provider packages reload.
     fn replace_model_catalog(&self, _models: Vec<rpi_ai::Model>) {}
     /// Invalidate child handles owned by an unloading/reloaded plugin.
@@ -565,6 +584,8 @@ pub struct ActionBridge {
     /// with the TUI, which drains it once per tick and writes the draft into the
     /// prompt editor.
     editor_text: crate::editor_text::EditorTextMailbox,
+    /// Routes component writes to the isolated host instead of a worker-local mailbox.
+    remote_ui_components: bool,
     /// B5d staleness flag. Shared so [`invalidate`] flips it for every clone.
     /// `true` while this bridge is the live session's bridge.
     active: Arc<AtomicBool>,
@@ -616,6 +637,7 @@ impl ActionBridge {
             ui_dialog: self.ui_dialog.clone(),
             ext_status: self.ext_status.clone(),
             editor_text: self.editor_text.clone(),
+            remote_ui_components: self.remote_ui_components,
             active: self.active.clone(),
         })
     }
@@ -643,6 +665,7 @@ impl ActionBridge {
             ui_dialog: UiDialogMailbox::new(),
             ext_status: crate::status::ExtensionStatusMailbox::new(),
             editor_text: crate::editor_text::EditorTextMailbox::new(),
+            remote_ui_components: false,
             active: Arc::new(AtomicBool::new(true)),
         })
     }
@@ -682,6 +705,7 @@ impl ActionBridge {
             ui_dialog,
             ext_status: crate::status::ExtensionStatusMailbox::new(),
             editor_text: crate::editor_text::EditorTextMailbox::new(),
+            remote_ui_components: false,
             active: Arc::new(AtomicBool::new(true)),
         })
     }
@@ -707,6 +731,7 @@ impl ActionBridge {
             ui_dialog,
             ext_status,
             editor_text,
+            remote_ui_components: false,
             active: Arc::new(AtomicBool::new(true)),
         })
     }
@@ -730,6 +755,7 @@ impl ActionBridge {
             ui_dialog: self.ui_dialog.clone(),
             ext_status: self.ext_status.clone(),
             editor_text: self.editor_text.clone(),
+            remote_ui_components: self.remote_ui_components,
             active: self.active.clone(),
         })
     }
@@ -761,6 +787,35 @@ impl ActionBridge {
     /// Clone the session status registry (TUI rendering + reload-created bridges).
     pub fn extension_status_mailbox(&self) -> crate::status::ExtensionStatusMailbox {
         self.ext_status.clone()
+    }
+
+    /// Routes `UiComponent` actions through the host capability pipe.
+    ///
+    /// This is used only inside an isolated worker, where its local mailbox is
+    /// not visible to the product TUI.
+    pub fn with_remote_ui_components(self: &Arc<Self>) -> Arc<Self> {
+        let mut bridge = self.clone_for_configuration();
+        bridge.remote_ui_components = true;
+        Arc::new(bridge)
+    }
+
+    /// Clones bridge configuration while retaining the shared lifecycle state.
+    fn clone_for_configuration(&self) -> Self {
+        Self {
+            invocation: self.invocation.clone(),
+            execution_context: self.execution_context.clone(),
+            stdio: self.stdio.clone(),
+            plugin_identity: self.plugin_identity.clone(),
+            component_owners: self.component_owners.clone(),
+            runtime: self.runtime.clone(),
+            host: self.host.clone(),
+            reload: self.reload.clone(),
+            ui_dialog: self.ui_dialog.clone(),
+            ext_status: self.ext_status.clone(),
+            editor_text: self.editor_text.clone(),
+            remote_ui_components: self.remote_ui_components,
+            active: self.active.clone(),
+        }
     }
 
     /// Clone the session editor-text queue (TUI drain + reload-created bridges).
@@ -1096,6 +1151,7 @@ fn run_action(
     let editor_text = bridge.editor_text.clone();
     let reload_cb = bridge.reload.clone();
     let execution_context = bridge.execution_context.clone();
+    let remote_ui_components = bridge.remote_ui_components;
     if action == RuntimeActionId::StdioLifecycle {
         let result = bridge.stdio.handle(
             bridge.plugin_identity.as_ref().map_or(0, |(id, _)| *id),
@@ -1104,16 +1160,23 @@ fn run_action(
         let _ = tx.send(result);
     } else if action == RuntimeActionId::UiComponent {
         let owner = bridge.plugin_identity.as_ref().map_or(0, |(id, _)| *id);
-        let _owners = bridge
-            .component_owners
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let result = if bridge.is_active() {
-            ext_status.component(owner, args)
+        if !bridge.is_active() {
+            let _ = tx.send(Err("stale plugin bridge".into()));
+        } else if remote_ui_components && owner == 0 {
+            let _ = tx.send(Err(
+                "remote UI components require a registered plugin owner".into(),
+            ));
+        } else if remote_ui_components {
+            bridge.runtime.spawn(async move {
+                let _ = tx.send(host.ui_component(owner, args).await);
+            });
         } else {
-            Err("stale plugin bridge".into())
-        };
-        let _ = tx.send(result);
+            let _owners = bridge
+                .component_owners
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let _ = tx.send(ext_status.component(owner, args));
+        }
     } else if action == RuntimeActionId::SideQuestion {
         let owner = bridge.plugin_identity.as_ref().map_or(0, |(id, _)| *id);
         if owner == 0 || bridge.invocation.is_some() {

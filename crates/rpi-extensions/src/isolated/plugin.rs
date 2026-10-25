@@ -181,7 +181,8 @@ impl WorkerHandler for PluginWorker {
         let action_host = Arc::new(WorkerActionHost {
             client: Arc::clone(&host),
         });
-        let bridge = ActionBridge::new(runtime.handle().clone(), action_host);
+        let bridge =
+            ActionBridge::new(runtime.handle().clone(), action_host).with_remote_ui_components();
         let session = load_session_mixed(
             &self.directories,
             &self.files,
@@ -505,6 +506,21 @@ impl WorkerActionHost {
 
 #[async_trait::async_trait]
 impl RuntimeActionHost for WorkerActionHost {
+    /// Relays plugin-owned component updates to the isolated worker host.
+    ///
+    /// # Parameters
+    /// - `owner`: Worker-local plugin identity.
+    /// - `args`: Component lifecycle operation.
+    ///
+    /// # Returns
+    /// The host mailbox result.
+    ///
+    /// # Errors
+    /// Returns a host denial or timeout.
+    async fn ui_component(&self, owner: u64, args: Value) -> Result<Value, String> {
+        self.relay("ui_component", json!({"owner": owner, "arguments": args}))
+    }
+
     /// Relays `send_message` to the host.
     async fn send_message(&self, args: Value) -> Result<Value, String> {
         self.relay("send_message", args)
