@@ -49,16 +49,7 @@ pub(crate) fn fingerprint(
         }
     }
     let keyed = !credential_material.is_empty();
-    if !keyed
-        && (url.contains('?')
-            || url.contains('#')
-            || url.split_once("://").is_some_and(|(_, rest)| {
-                rest.split('/')
-                    .next()
-                    .is_some_and(|host| host.contains('@'))
-            })
-            || headers.keys().any(|name| !public_header(name)))
-    {
+    if !keyed && (!public_endpoint(url) || headers.keys().any(|name| !public_header(name))) {
         return None;
     }
     let mut canonical_headers = headers
@@ -137,6 +128,85 @@ fn public_header(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "accept" | "content-type" | "anthropic-version" | "user-agent"
     )
+}
+
+/// Returns whether an unauthenticated endpoint has a known public shape.
+///
+/// Custom hosts and paths are omitted because they can contain private routing
+/// data or credentials even when their URL has no query string.
+///
+/// # Parameters
+/// - `url`: Fully resolved provider endpoint.
+///
+/// # Returns
+/// `true` when the scheme, host, and every path segment are allowlisted.
+fn public_endpoint(url: &str) -> bool {
+    if url.contains('?') || url.contains('#') {
+        return false;
+    }
+    let Some((scheme, remainder)) = url.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https") {
+        return false;
+    }
+    let (authority, path) = remainder.split_once('/').unwrap_or((remainder, ""));
+    if authority.is_empty() || authority.contains('@') || authority.contains('%') {
+        return false;
+    }
+    let host = if authority.starts_with('[') {
+        authority
+            .split_once(']')
+            .map(|(address, _)| address.to_ascii_lowercase() + "]")
+            .unwrap_or_default()
+    } else {
+        authority
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+    let known_provider_host = matches!(
+        host.as_str(),
+        "api.openai.com"
+            | "api.anthropic.com"
+            | "generativelanguage.googleapis.com"
+            | "api.mistral.ai"
+            | "api.groq.com"
+            | "api.deepseek.com"
+            | "api.x.ai"
+            | "api.cohere.com"
+            | "api.together.xyz"
+            | "api.perplexity.ai"
+            | "openrouter.ai"
+    );
+    let loopback_host = host == "localhost"
+        || host == "[::1]"
+        || host == "[::]"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    let public_path = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .all(|segment| {
+            matches!(
+                segment,
+                "api"
+                    | "openai"
+                    | "anthropic"
+                    | "v1"
+                    | "v1beta"
+                    | "v2"
+                    | "chat"
+                    | "completions"
+                    | "responses"
+                    | "messages"
+                    | "models"
+                    | "generateContent"
+            )
+        });
+    (known_provider_host || loopback_host) && public_path
 }
 
 /// Computes HMAC-SHA-256 using request credentials as an ephemeral key.
@@ -264,18 +334,18 @@ mod tests {
     #[test]
     fn request_effect_fields_change_identity() {
         let headers = BTreeMap::from([("content-type".to_owned(), "application/json".to_owned())]);
-        let original = fingerprint("https://provider.example/v1", &body(), &headers, None).unwrap();
+        let original = fingerprint("https://api.openai.com/v1", &body(), &headers, None).unwrap();
         let changed_url =
-            fingerprint("https://provider.example/v2", &body(), &headers, None).unwrap();
+            fingerprint("https://api.openai.com/v2", &body(), &headers, None).unwrap();
         let changed_body = fingerprint(
-            "https://provider.example/v1",
+            "https://api.openai.com/v1",
             &serde_json::json!({"model": "model-b"}),
             &headers,
             None,
         )
         .unwrap();
         let changed_headers = fingerprint(
-            "https://provider.example/v1",
+            "https://api.openai.com/v1",
             &body(),
             &BTreeMap::from([(
                 "content-type".to_owned(),
@@ -335,6 +405,33 @@ mod tests {
             None
         );
         let public_headers = BTreeMap::new();
+        assert!(
+            fingerprint(
+                "https://api.openai.com/v1/chat/completions",
+                &body(),
+                &public_headers,
+                None
+            )
+            .is_some()
+        );
+        assert_eq!(
+            fingerprint(
+                "https://provider.example/v1",
+                &body(),
+                &public_headers,
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            fingerprint(
+                "https://api.openai.com/v1/private-token",
+                &body(),
+                &public_headers,
+                None
+            ),
+            None
+        );
         assert_eq!(
             fingerprint(
                 "https://provider.example/v1?token=secret",
