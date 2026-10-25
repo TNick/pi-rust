@@ -3,11 +3,12 @@
 use std::any::Any;
 use std::fmt;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::{ExtensionSession, PluginKeepalive, RegistrySnapshot};
 
+use super::admission::Admissions;
 use super::identity::{GenerationId, GenerationIdentity};
 
 /// Why an operation addressed at a generation was refused.
@@ -122,10 +123,11 @@ pub struct SessionGeneration {
     id: GenerationId,
     session: ExtensionSession,
     retained: Vec<Arc<dyn Any + Send + Sync>>,
-    /// `false` once retired. Checked after incrementing [`Self::in_flight`], so a
-    /// retire that races with entry either sees the count or refuses the caller.
-    active: Arc<AtomicBool>,
-    in_flight: Arc<AtomicUsize>,
+    /// Closed plus admitted-call count in one word. Entry and supersession are
+    /// decided by this single CAS, so a generation that a publication already
+    /// replaced cannot admit a call, and a call that was admitted before the
+    /// replacement stays counted until its guard is released.
+    admissions: Admissions,
     catalog_revision: Option<u64>,
 }
 
@@ -150,8 +152,7 @@ impl SessionGeneration {
             id,
             session,
             retained,
-            active: Arc::new(AtomicBool::new(true)),
-            in_flight: Arc::new(AtomicUsize::new(0)),
+            admissions: Admissions::open(),
             catalog_revision,
         }
     }
@@ -212,17 +213,18 @@ impl SessionGeneration {
     /// `false` once the generation was retired by a replacement or by
     /// [`ExtensionGenerationSlot::retire`](super::ExtensionGenerationSlot::retire).
     pub fn is_active(&self) -> bool {
-        self.active.load(Ordering::SeqCst)
+        self.admissions.is_open()
     }
 
     /// Enter one call against this generation.
     ///
     /// The returned guard holds a lease on the generation, so the plugin
     /// artifacts and any pinned host resource stay valid for the whole call even
-    /// if the generation is superseded while the call runs. The generation's
-    /// staleness state is checked **after** the count is published, so retirement
-    /// and entry cannot both win: a caller that entered before the retire is
-    /// counted, and a caller that arrives after it is refused.
+    /// if the generation is superseded while the call runs. Entry and retirement
+    /// are one CAS on [`SessionGeneration::admissions`]: either this call is
+    /// counted, or the generation is already closed and the call is refused.
+    /// There is no intermediate state in which a closed generation reports a new
+    /// in-flight call.
     ///
     /// # Returns
     /// The in-flight guard for this call.
@@ -230,9 +232,7 @@ impl SessionGeneration {
     /// # Errors
     /// [`GenerationError::Retired`] when the generation no longer admits calls.
     pub fn begin_call(self: &Arc<Self>) -> Result<InFlightGuard, GenerationError> {
-        self.in_flight.fetch_add(1, Ordering::SeqCst);
-        if !self.active.load(Ordering::SeqCst) {
-            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if !self.admissions.admit() {
             return Err(GenerationError::Retired {
                 generation: self.id,
             });
@@ -250,7 +250,7 @@ impl SessionGeneration {
     /// # Returns
     /// Number of live [`InFlightGuard`]s.
     pub fn in_flight(&self) -> usize {
-        self.in_flight.load(Ordering::SeqCst)
+        self.admissions.admitted()
     }
 
     /// Whether no call is admitted against this generation.
@@ -268,7 +268,7 @@ impl SessionGeneration {
     /// long as any lease references this generation, so callers already inside
     /// plugin code keep valid function pointers.
     pub(crate) fn retire(&self) {
-        if !self.active.swap(false, Ordering::SeqCst) {
+        if !self.admissions.close() {
             return;
         }
         if let Some(snapshot) = self.session.snapshot_arc() {
@@ -353,6 +353,6 @@ impl fmt::Debug for InFlightGuard {
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.generation.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.generation.admissions.release();
     }
 }

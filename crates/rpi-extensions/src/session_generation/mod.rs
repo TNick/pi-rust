@@ -23,6 +23,14 @@
 //!   while the publication gate is held, and only then swaps the generation in.
 //!   A rejected commit changes nothing: the live generation stays live and the
 //!   candidate's artifacts are released unloaded.
+//! - **Supersession and call entry are one decision.** The superseded generation
+//!   is retired inside the same gate region that installs the replacement, and
+//!   before that replacement becomes readable, so there is no interval in which
+//!   a reader sees the new catalog while the session it replaces still admits a
+//!   new [`InFlightGuard`]. Entry and retirement are a single CAS on the
+//!   generation's admission state: an entry that wins is counted, an entry that
+//!   arrives after the retirement is refused, and a refused entry never appears
+//!   in the total a host watches while it drains.
 //! - **Retention, not eager teardown.** Retirement flips staleness state only.
 //!   The superseded generation's keepalive and pinned resources stay alive while
 //!   any [`InFlightGuard`] or `Arc<SessionGeneration>` lease references them, so
@@ -54,11 +62,16 @@
 //!
 //! Publish *after* finishing anything that still needs the old session to look
 //! live (shutdown lifecycle events, a final resource discover). Publication is
-//! the point at which the old generation stops accepting new dispatch. The
-//! plugin-initiated "reload me" signal stays
+//! the point at which the old generation stops accepting new dispatch, and the
+//! gate is held across that retirement: the supersession side effects — flipping
+//! the [`RegistrySnapshot`] flag and [`ActionBridge::invalidate`], which reaches
+//! the host's cancel hooks — run under it. Host code reachable from a
+//! publication, including the commit hook and those cancel hooks, must not call
+//! back into the slot. The plugin-initiated "reload me" signal stays
 //! [`ReloadMailbox`](crate::ReloadMailbox); this module does not add a second
 //! one.
 
+mod admission;
 mod generation;
 mod identity;
 mod slot;

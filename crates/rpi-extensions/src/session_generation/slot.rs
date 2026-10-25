@@ -134,7 +134,12 @@ impl ExtensionGenerationSlot {
     /// Enter one call against the live generation.
     ///
     /// This is the host-side gate for dispatch paths that have no staleness check
-    /// of their own — notably plugin tool execution.
+    /// of their own — notably plugin tool execution. The slot takes the
+    /// publication gate's read lock to pick the generation, so an entry either
+    /// addresses the generation that is live at that instant or, when the host
+    /// holds a lease on a superseded generation and calls
+    /// [`SessionGeneration::begin_call`] directly, is refused by that
+    /// generation's closed admission state.
     ///
     /// # Returns
     /// The in-flight guard for the live generation.
@@ -173,9 +178,16 @@ impl ExtensionGenerationSlot {
     /// session or the old catalog rows with the new session. `commit` must not
     /// call back into this slot (the gate is already held) or block indefinitely.
     ///
-    /// The superseded generation is invalidated as soon as the new one is
-    /// published, and its artifacts and pinned resources stay alive until every
-    /// lease on it is released.
+    /// The superseded generation is retired inside the same gate region, before
+    /// the replacement becomes readable, so there is no point at which a
+    /// generation the host has already replaced still admits a new `begin_call`
+    /// or dispatches through a snapshot/bridge whose staleness was never
+    /// published. That retirement's side effects — flipping the
+    /// [`RegistrySnapshot`](crate::RegistrySnapshot) flag and
+    /// [`ActionBridge::invalidate`](crate::ActionBridge::invalidate), which
+    /// reaches the host's cancel hooks — also run under the gate, so they must
+    /// not call back into this slot either. The superseded generation's artifacts
+    /// and pinned resources stay alive until every lease on it is released.
     ///
     /// # Parameters
     /// - `candidate`: Staged replacement session and pinned resources.
@@ -220,9 +232,17 @@ impl ExtensionGenerationSlot {
             retained,
             catalog_revision,
         ));
-        let previous = std::mem::replace(&mut *current, Arc::clone(&published));
-        drop(current);
+        // The outgoing generation is closed before the replacement is installed,
+        // and both happen inside this gate region. A reader cannot see the
+        // replacement while the outgoing session still admits entry, and it
+        // cannot see the closed outgoing generation either because it is parked
+        // on the gate: closing entry and installing the replacement are one
+        // indivisible publication. A call that won the entry CAS just before the
+        // close stays counted in `previous`, which is what keeps its leases alive
+        // while the host drains that generation.
+        let previous = Arc::clone(&*current);
         previous.retire();
+        *current = Arc::clone(&published);
         Ok(PublishedGeneration {
             current: published,
             previous,

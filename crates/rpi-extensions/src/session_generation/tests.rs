@@ -1,7 +1,9 @@
 //! Tests for atomic extension-session generation replacement.
 
+mod admission_state;
 mod helpers;
 mod secret_free_output;
+mod supersession_race;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -174,6 +176,10 @@ fn a_rejected_commit_changes_nothing() {
     assert_eq!(slot.current_id(), live_id);
     assert_eq!(slot.resolve(live_id).map(|lease| lease.id()), Ok(live_id));
     assert_eq!(slot.current_identity().tools, vec!["first".to_owned()]);
+    assert!(
+        slot.begin_call().is_ok(),
+        "a rejected commit must not retire the generation that is still live"
+    );
     assert_eq!(guard.in_flight(), 1, "the live call is unaffected");
     drop(guard);
 }
