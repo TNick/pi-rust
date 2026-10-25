@@ -290,6 +290,42 @@ mod tests {
         assert_ne!(original, changed_headers);
     }
 
+    /// Verifies an authenticated custom header is covered without being exposed.
+    #[test]
+    fn authenticated_unclassified_header_changes_identity_without_disclosure() {
+        let first_headers = BTreeMap::from([
+            (
+                "authorization".to_owned(),
+                "Bearer credential-alpha".to_owned(),
+            ),
+            (
+                "x-tenant-token".to_owned(),
+                "tenant-secret-alpha".to_owned(),
+            ),
+        ]);
+        let second_headers = BTreeMap::from([
+            (
+                "authorization".to_owned(),
+                "Bearer credential-alpha".to_owned(),
+            ),
+            ("x-tenant-token".to_owned(), "tenant-secret-beta".to_owned()),
+        ]);
+        let first =
+            fingerprint("https://provider.example/v1", &body(), &first_headers, None).unwrap();
+        let second = fingerprint(
+            "https://provider.example/v1",
+            &body(),
+            &second_headers,
+            None,
+        )
+        .unwrap();
+
+        assert_ne!(first, second);
+        let rendered = format!("{first} {second}");
+        assert!(!rendered.contains("tenant-secret-alpha"));
+        assert!(!rendered.contains("tenant-secret-beta"));
+    }
+
     /// Verifies unclassified unauthenticated inputs cannot claim completeness.
     #[test]
     fn unsafe_unauthenticated_request_has_no_identity() {
