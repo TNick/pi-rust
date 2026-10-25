@@ -52,9 +52,9 @@ use rpi_plugin_sdk::callbacks::OwnedString;
 use rpi_plugin_sdk::{StbString, StbStringRef};
 use tokio::runtime::Handle;
 
+use crate::PluginKeepalive;
 use crate::loader::ExtensionSession;
 use crate::registry::{RegisteredProvider, RegistrySnapshot};
-use crate::PluginKeepalive;
 
 #[cfg(test)]
 mod lifetime_tests;
@@ -391,6 +391,7 @@ fn incomplete_applied_settings_report(model: &Model) -> AppliedRequestSettings {
         model_id: model.id.clone(),
         api_id: model.api.as_str().to_owned(),
         applied_values: Default::default(),
+        request_body_sha256: None,
         omitted_categories: vec![
             "extension_managed_request_transforms".to_owned(),
             "provider_applied_values_unavailable".to_owned(),
@@ -1149,7 +1150,7 @@ extern "C" fn control_report_applied_settings(
     .unwrap_or(1)
 }
 
-/// Retain only the applied-settings v1 allowlist from an extension report.
+/// Retains only the supported applied-settings fields from an extension report.
 ///
 /// # Parameters
 /// - `value`: Parsed report object.
@@ -1167,18 +1168,30 @@ fn normalize_extension_report(
         "modelId",
         "apiId",
         "appliedValues",
+        "requestBodySha256",
         "omittedCategories",
         "complete",
     ];
+    let schema = object.get("schemaVersion")?.as_str()?;
     if object.keys().any(|key| !FIELDS.contains(&key.as_str()))
-        || object.get("schemaVersion")?.as_str()? != "rpi-applied-request-settings-v1"
+        || !matches!(
+            schema,
+            "rpi-applied-request-settings-v1" | "rpi-applied-request-settings-v2"
+        )
+        || (schema == "rpi-applied-request-settings-v1" && object.contains_key("requestBodySha256"))
     {
         return None;
     }
     let mut report: AppliedRequestSettings = serde_json::from_value(value.clone()).ok()?;
+    if report.request_body_sha256.as_ref().is_some_and(|digest| {
+        digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return None;
+    }
     if report.provider_id != model.provider
         || report.model_id != model.id
         || report.api_id != model.api.as_str()
+        || (schema == "rpi-applied-request-settings-v2" && report.request_body_sha256.is_none())
     {
         return None;
     }
@@ -2110,6 +2123,40 @@ mod tests {
     use super::*;
     use crate::registry::ExtensionRegistry;
 
+    /// Preserves valid version-2 body identities and rejects malformed digests.
+    #[test]
+    fn extension_applied_settings_v2_requires_a_valid_body_digest() {
+        let model = Model::new(
+            "model-a",
+            "Model A",
+            rpi_ai::types::Api::OpenaiCompletions,
+            "provider-a",
+            "https://example.test",
+        );
+        let report = serde_json::json!({
+            "schemaVersion": "rpi-applied-request-settings-v2",
+            "providerId": "provider-a",
+            "modelId": "model-a",
+            "apiId": "openai-completions",
+            "appliedValues": {},
+            "requestBodySha256": "a".repeat(64),
+            "omittedCategories": ["headers_and_credentials"],
+            "complete": false
+        });
+
+        let normalized = normalize_extension_report(&report, &model)
+            .expect("valid version-2 extension attestation");
+        let expected_digest = "a".repeat(64);
+        assert_eq!(
+            normalized.request_body_sha256.as_deref(),
+            Some(expected_digest.as_str())
+        );
+
+        let mut malformed = report;
+        malformed["requestBodySha256"] = serde_json::json!("not-a-digest");
+        assert!(normalize_extension_report(&malformed, &model).is_none());
+    }
+
     /// Provider model options reach extension providers through the versioned
     /// request envelope while staying out of public model serialization.
     #[test]
@@ -2201,12 +2248,14 @@ mod tests {
                 "additionalProperties": false
             }),
         });
-        assert!(request_envelope_json(
-            &model,
-            &Context::new(vec![]),
-            &SimpleStreamOptions::default(),
-        )
-        .is_err());
+        assert!(
+            request_envelope_json(
+                &model,
+                &Context::new(vec![]),
+                &SimpleStreamOptions::default(),
+            )
+            .is_err()
+        );
     }
 
     /// A callback state used to verify manifest-gated provider requests.

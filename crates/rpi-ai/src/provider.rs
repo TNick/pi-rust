@@ -3,12 +3,13 @@
 //! provider's wire format directly; it calls `stream_simple` and consumes the
 //! returned [`AssistantMessageEventStream`].
 
-use crate::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
+use crate::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
 use crate::model::Model;
 use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, DeferredHandle, ErrorReason, StopReason,
     ThinkingBudgets, ThinkingLevel,
 };
+use sha2::{Digest, Sha256};
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -128,12 +129,13 @@ pub(crate) fn reject_opaque_provider_options(
     Some(stream)
 }
 
-/// Publishes an allowlisted projection of the final provider request body.
+/// Publishes safe settings and an opaque digest of the final provider body.
 ///
 /// Values are read from the body after provider transformation. Prompt and
 /// content fields, headers, credentials, arbitrary sampling values, and
-/// provider-specific opaque fields are never copied. The report remains
-/// incomplete because transport headers and arbitrary body data are omitted.
+/// provider-specific opaque fields are never copied; the body contributes only
+/// a digest. The report remains incomplete because endpoint and transport
+/// header identity are omitted.
 ///
 /// # Parameters
 /// - `model`: Model descriptor used to prepare the request.
@@ -200,12 +202,19 @@ pub(crate) fn report_applied_request_settings(
             }
         }
     }
+    let request_body_sha256 = serde_json::to_vec(body).ok().map(|bytes| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    });
     callback(AppliedRequestSettings {
-        schema_version: "rpi-applied-request-settings-v1".to_owned(),
+        schema_version: "rpi-applied-request-settings-v2".to_owned(),
         provider_id: model.provider.clone(),
         model_id: model.id.clone(),
         api_id: model.api.as_str().to_owned(),
         applied_values,
+        request_body_sha256,
         omitted_categories: vec![
             "endpoint".to_owned(),
             "headers_and_credentials".to_owned(),
@@ -229,6 +238,7 @@ pub const DEFAULT_LLM_API_TIMEOUT: Duration = Duration::from_secs(600);
 /// - `model_id`: Model identifier placed in the request.
 /// - `api_id`: Provider API identifier.
 /// - `applied_values`: Allowlisted scalar settings found in the final body.
+/// - `request_body_sha256`: Digest of the exact prepared JSON body.
 /// - `omitted_categories`: Sensitive or opaque request categories omitted.
 /// - `complete`: Whether every request-affecting setting is represented.
 ///
@@ -247,6 +257,9 @@ pub struct AppliedRequestSettings {
     pub api_id: String,
     /// Sanitized allowlisted settings observed in the final request body.
     pub applied_values: BTreeMap<String, serde_json::Value>,
+    /// SHA-256 identity of the exact prepared JSON body, without storing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_sha256: Option<String>,
     /// Omitted request categories that may contain secrets or opaque data.
     pub omitted_categories: Vec<String>,
     /// Whether the report attests every request-affecting value.
@@ -440,8 +453,60 @@ impl SimpleStreamOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{Provider, ProviderContinuation, SimpleStreamOptions, DEFAULT_LLM_API_TIMEOUT};
+    use super::{
+        AppliedRequestSettings, AppliedRequestSettingsCallback, DEFAULT_LLM_API_TIMEOUT, Provider,
+        ProviderContinuation, SimpleStreamOptions, report_applied_request_settings,
+    };
+    use crate::model::Model;
+    use crate::types::Api;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    /// Captures exact final-body identity without retaining request content.
+    #[test]
+    fn applied_settings_hash_the_prepared_body_without_serializing_it() {
+        let model = Model::new(
+            "model-a",
+            "Model A",
+            Api::OpenaiCompletions,
+            "provider-a",
+            "https://example.invalid/v1",
+        );
+        let reports = Arc::new(Mutex::new(Vec::<AppliedRequestSettings>::new()));
+        let sink = Arc::clone(&reports);
+        let callback: AppliedRequestSettingsCallback =
+            Arc::new(move |report| sink.lock().unwrap().push(report));
+        let first_body = json!({
+            "model": "model-a",
+            "temperature": 0.5,
+            "input": "private prompt sentinel"
+        });
+        let second_body = json!({
+            "model": "model-a",
+            "temperature": 0.5,
+            "input": "different private prompt"
+        });
+
+        report_applied_request_settings(&model, Some(&callback), &first_body);
+        report_applied_request_settings(&model, Some(&callback), &second_body);
+
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports[0].schema_version, "rpi-applied-request-settings-v2");
+        let first_digest = reports[0]
+            .request_body_sha256
+            .as_deref()
+            .expect("prepared body digest");
+        let second_digest = reports[1]
+            .request_body_sha256
+            .as_deref()
+            .expect("prepared body digest");
+        assert_eq!(first_digest.len(), 64);
+        assert_ne!(first_digest, second_digest);
+        let encoded = serde_json::to_string(&reports[0]).expect("report JSON");
+        assert!(!encoded.contains("private prompt sentinel"));
+        assert!(!reports[0].complete);
+    }
 
     #[test]
     fn llm_api_timeout_defaults_to_ten_minutes() {

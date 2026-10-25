@@ -304,6 +304,7 @@ fn incomplete_settings(model: &Model) -> rpi_ai::AppliedRequestSettings {
         model_id: model.id.clone(),
         api_id: model.api.as_str().to_owned(),
         applied_values: Default::default(),
+        request_body_sha256: None,
         omitted_categories: vec![
             "extension_managed_request_transforms".to_owned(),
             "provider_applied_values_unavailable".to_owned(),
