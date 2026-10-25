@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -224,6 +224,26 @@ impl IsolatedWorker {
     /// # Errors
     /// Returns an authorization, protocol, timeout, or command error.
     pub fn call_command(&self, command: &str, arguments: &str) -> Result<Value, WorkerError> {
+        self.call_command_action(command, arguments, None)
+    }
+
+    /// Executes an advertised command with an optional structured UI action.
+    ///
+    /// - `command`: Advertised command identifier.
+    /// - `arguments`: Raw text following the command name.
+    /// - `action`: Optional action returned from a plugin selector, editor, or input.
+    ///
+    /// # Returns
+    /// The plugin's structured user-interface response.
+    ///
+    /// # Errors
+    /// Returns an authorization, protocol, timeout, cancellation, or command error.
+    pub fn call_command_action(
+        &self,
+        command: &str,
+        arguments: &str,
+        action: Option<Value>,
+    ) -> Result<Value, WorkerError> {
         if !self
             .commands
             .iter()
@@ -236,6 +256,7 @@ impl IsolatedWorker {
                 id: 0,
                 command: command.to_owned(),
                 arguments: arguments.to_owned(),
+                action,
             },
             None,
         )

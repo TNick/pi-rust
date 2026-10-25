@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use rpi_agent::agent_tool::AgentTool;
 use rpi_agent::types::{AgentToolResult, TextContentOrImage};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::actions::{ActionBridge, RuntimeActionHost};
-use crate::loader::{PluginKeepalive, load_session_mixed};
+use crate::loader::{load_session_mixed, PluginKeepalive};
 use crate::registry::ExtensionTool;
 use crate::tool::PluginToolAdapter;
 use crate::{NullDiagnostics, PluginDiagnostics};
@@ -18,7 +18,7 @@ use super::protocol::{
     WorkerCommandSpec, WorkerProviderOptions, WorkerProviderOutcome, WorkerProviderRequest,
     WorkerProviderResponse, WorkerProviderSpec, WorkerToolSpec,
 };
-use super::worker::{WorkerHandler, WorkerHostClient, serve_worker_stdio};
+use super::worker::{serve_worker_stdio, WorkerHandler, WorkerHostClient};
 
 /// Native plugin set loaded inside a worker process.
 ///
@@ -340,6 +340,7 @@ impl WorkerHandler for PluginWorker {
     ///
     /// - `command_name`: Exact normalized command identifier.
     /// - `arguments`: Raw command arguments from the host.
+    /// - `action`: Optional structured UI action from a prior response.
     /// - `cancellation`: Shared host cancellation token.
     ///
     /// # Returns
@@ -352,6 +353,7 @@ impl WorkerHandler for PluginWorker {
         &self,
         command_name: &str,
         arguments: String,
+        action: Option<Value>,
         cancellation: CancellationToken,
     ) -> Result<Value, String> {
         if cancellation.is_cancelled() {
@@ -369,11 +371,14 @@ impl WorkerHandler for PluginWorker {
             .iter()
             .find(|command| command.name.trim_start_matches('/') == command_name)
             .ok_or_else(|| "plugin command is not registered".to_owned())?;
-        let input = serde_json::json!({
+        let mut input = serde_json::json!({
             "args": arguments,
             "command": format!("/{command_name}"),
-        })
-        .to_string();
+        });
+        if let Some(action) = action {
+            input["action"] = action;
+        }
+        let input = input.to_string();
         let mut output = rpi_plugin_sdk::StbString::empty();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let status = (command.handler)(

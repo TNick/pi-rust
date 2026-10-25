@@ -10,7 +10,7 @@ use crate::isolated::protocol::{
     WorkerCommandSpec, WorkerFrame, WorkerProviderOptions, WorkerProviderOutcome,
     WorkerProviderRequest, WorkerProviderResponse, WorkerProviderSpec,
 };
-use crate::isolated::worker::{WorkerHandler, serve_worker};
+use crate::isolated::worker::{serve_worker, WorkerHandler};
 
 /// Captures provider calls made by the worker service test.
 struct ProviderFixture {
@@ -115,12 +115,16 @@ impl WorkerHandler for ProviderFixture {
         &self,
         command: &str,
         arguments: String,
+        action: Option<Value>,
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         if command != "fixture-command" {
             return Err("unknown fixture command".to_owned());
         }
-        Ok(serde_json::json!({"kind": "message", "text": arguments}))
+        Ok(serde_json::json!({"kind": "message", "text": {
+            "arguments": arguments,
+            "action": action,
+        }}))
     }
 }
 
@@ -179,6 +183,7 @@ fn provider_registration_and_request_round_trip_through_worker_protocol() {
             id: 8,
             command: "fixture-command".to_owned(),
             arguments: "hello from host".to_owned(),
+            action: Some(serde_json::json!({"selected": "option-1"})),
         }
         .encode()
         .expect("command frame encoding"),
@@ -234,7 +239,10 @@ fn provider_registration_and_request_round_trip_through_worker_protocol() {
     assert!(matches!(
         frames.iter().find(|frame| matches!(frame, WorkerFrame::CommandResult { id: 8, .. })),
         Some(WorkerFrame::CommandResult { id: 8, result })
-            if result["text"] == "hello from host"
+            if result["text"] == serde_json::json!({
+                "arguments": "hello from host",
+                "action": {"selected": "option-1"},
+            })
     ));
     assert!(!String::from_utf8_lossy(&output).contains("secret-material"));
 }

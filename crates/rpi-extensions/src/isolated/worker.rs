@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -225,6 +225,7 @@ pub trait WorkerHandler: Send + Sync {
     ///
     /// - `command`: Exact command identifier advertised at startup.
     /// - `arguments`: Raw text after the command name.
+    /// - `action`: Optional plugin UI action returned from a prior response.
     /// - `cancellation`: Shared host cancellation token.
     ///
     /// # Returns
@@ -236,6 +237,7 @@ pub trait WorkerHandler: Send + Sync {
         &self,
         _command: &str,
         _arguments: String,
+        _action: Option<Value>,
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         Err("worker slash commands are not supported".to_owned())
@@ -360,6 +362,7 @@ where
                 id,
                 command,
                 arguments,
+                action,
             } => {
                 let cancellation = CancellationToken::new();
                 if let Ok(mut cancellations) = cancellations.lock() {
@@ -370,7 +373,7 @@ where
                 let cancellations = Arc::clone(&cancellations);
                 let handle = thread::spawn(move || {
                     let response = handler
-                        .call_command(&command, arguments, cancellation)
+                        .call_command(&command, arguments, action, cancellation)
                         .map_or_else(
                             |error| WorkerFrame::CommandError { id, error },
                             |result| WorkerFrame::CommandResult { id, result },

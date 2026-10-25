@@ -179,6 +179,9 @@ pub enum WorkerFrame {
         command: String,
         /// Raw command arguments supplied after the command name.
         arguments: String,
+        /// Optional structured action returned by a plugin command UI.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<Value>,
     },
     /// Worker returns a command's structured UI response.
     CommandResult {
