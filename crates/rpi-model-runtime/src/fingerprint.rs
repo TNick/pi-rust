@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-const MODEL_EXECUTION_SCHEMA: &str = "rpi-model-execution-v1";
+const MODEL_EXECUTION_SCHEMA: &str = "rpi-model-execution-v2";
 
 /// Describes the legacy model-configuration digest coverage.
 ///
@@ -69,6 +69,7 @@ pub enum ModelExecutionExclusion {
 /// - `model_id`: Public model identifier from the model catalog.
 /// - `api_id`: Public provider API identifier.
 /// - `sha256`: Digest of the canonical safe typed projection.
+/// - `endpoint_sha256`: Digest of the safe normalized endpoint, when available.
 /// - `complete`: Whether omitted values cannot affect execution.
 /// - `excluded_fields`: Present excluded fields that limit coverage.
 /// - `headers_excluded`: Always true; request headers never enter the digest.
@@ -89,6 +90,9 @@ pub struct ModelExecutionFingerprint {
     pub api_id: String,
     /// Lowercase SHA-256 digest of the canonical safe typed projection.
     pub sha256: String,
+    /// Digest of the normalized endpoint when it has no user information,
+    /// query, or fragment.
+    pub endpoint_sha256: Option<String>,
     /// Whether omitted values cannot affect the model execution.
     pub complete: bool,
     /// Present fields omitted because their safety or semantics are unknown.
@@ -101,12 +105,12 @@ pub struct ModelExecutionFingerprint {
 
 /// Fingerprints a conservative typed projection of upstream model metadata.
 ///
-/// Stable public IDs and typed fields are included. Endpoint strings, headers,
+/// Stable public IDs and typed fields are included. Validated endpoint URLs
+/// without user information, query, or fragment contribute a digest, never
+/// their raw value. Unsafe endpoints and headers,
 /// runtime-only options, arbitrary sampling JSON, unconstrained thinking maps,
-/// and opaque compatibility JSON are excluded. Since endpoint identity is
-/// always omitted, this API always reports incomplete coverage. A future full
-/// fingerprint requires validated endpoint identity and provider-owned safe
-/// projections for currently opaque request-shaping fields.
+/// and opaque compatibility JSON are excluded. Provider-owned safe
+/// projections are still required for currently opaque request-shaping fields.
 ///
 /// # Parameters
 /// - `model`: Resolved upstream model descriptor to fingerprint.
@@ -149,7 +153,17 @@ pub fn model_execution_fingerprint(model: &Model) -> ModelExecutionFingerprint {
     projection.insert("contextWindow".into(), Value::from(model.context_window));
     projection.insert("maxTokens".into(), Value::from(model.max_tokens));
 
-    let mut excluded_fields = vec![ModelExecutionExclusion::Endpoint];
+    let endpoint_sha256 = safe_endpoint_digest(&model.base_url);
+    if let Some(endpoint_digest) = &endpoint_sha256 {
+        projection.insert(
+            "endpointSha256".into(),
+            Value::String(endpoint_digest.clone()),
+        );
+    }
+    let mut excluded_fields = Vec::new();
+    if endpoint_sha256.is_none() {
+        excluded_fields.push(ModelExecutionExclusion::Endpoint);
+    }
     if model
         .headers
         .as_ref()
@@ -191,11 +205,32 @@ pub fn model_execution_fingerprint(model: &Model) -> ModelExecutionFingerprint {
         model_id: model.id.clone(),
         api_id: model.api.as_str().into(),
         sha256: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        endpoint_sha256,
         complete: excluded_fields.is_empty(),
         excluded_fields,
         headers_excluded: true,
         provider_options_included: false,
     }
+}
+
+/// Hashes a normalized endpoint only when it contains no likely credentials.
+///
+/// # Parameters
+/// - `endpoint`: Endpoint string from the resolved model.
+///
+/// # Returns
+/// A SHA-256 digest for a valid URL without user information, query, or fragment.
+fn safe_endpoint_digest(endpoint: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(endpoint).ok()?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    let digest = Sha256::digest(parsed.as_str().as_bytes());
+    Some(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Fingerprints model configuration using the conservative execution schema.
@@ -239,141 +274,5 @@ fn canonicalize(object: &mut Map<String, Value>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use rpi_ai::model::OpenaiCompletionsCompat;
-    use rpi_ai::{Api, Model, StreamingProtocolCompat};
-    use serde_json::json;
-
-    use super::{model_execution_fingerprint, ModelExecutionExclusion as Exclusion};
-
-    /// Creates a model with stable public identifiers and typed metadata.
-    fn model() -> Model {
-        let mut model = Model::new(
-            "model-public-id",
-            "Model display name",
-            Api::OpenaiCompletions,
-            "provider-public-id",
-            "https://example.invalid/v1",
-        );
-        model.reasoning = true;
-        model.context_window = 32_000;
-        model.max_tokens = 4_096;
-        model.compat = Some(StreamingProtocolCompat::OpenaiCompletions(
-            OpenaiCompletionsCompat {
-                supports_strict_mode: Some(true),
-                ..OpenaiCompletionsCompat::default()
-            },
-        ));
-        model
-    }
-
-    /// Exposes stable IDs and fingerprints included typed request metadata.
-    #[test]
-    fn includes_public_ids_and_typed_metadata() {
-        let original = model();
-        let original_fingerprint = model_execution_fingerprint(&original);
-        let mut changed = original.clone();
-        changed.max_tokens += 1;
-
-        let changed_fingerprint = model_execution_fingerprint(&changed);
-
-        assert_eq!(original_fingerprint.provider_id, "provider-public-id");
-        assert_eq!(original_fingerprint.model_id, "model-public-id");
-        assert_eq!(original_fingerprint.api_id, "openai-completions");
-        assert_ne!(original_fingerprint.sha256, changed_fingerprint.sha256);
-        assert!(!original_fingerprint.complete);
-        assert!(original_fingerprint
-            .excluded_fields
-            .contains(&Exclusion::Endpoint));
-    }
-
-    /// Excludes endpoints, auth headers, runtime options, and opaque values.
-    #[test]
-    fn omits_untrusted_and_secret_bearing_values() {
-        let mut original = model();
-        original.base_url = "https://user:secret@example.invalid/path?token=one".into();
-        original.headers = Some(std::collections::BTreeMap::from([(
-            "authorization".into(),
-            "header-secret-one".into(),
-        )]));
-        original
-            .provider_options
-            .insert("runtime-secret".into(), json!("runtime-secret-one"));
-        original.sampling_params = Some(serde_json::Map::from_iter([(
-            "custom".into(),
-            json!("sampling-secret-one"),
-        )]));
-        original.thinking_level_map = Some(std::collections::BTreeMap::from([(
-            rpi_ai::ThinkingLevel::High,
-            Some("thinking-secret-one".into()),
-        )]));
-        original.compat = Some(StreamingProtocolCompat::Other(json!({
-            "opaque": "compat-secret-one"
-        })));
-        let mut changed = original.clone();
-        changed.base_url = "https://user:secret@example.invalid/path?token=two".into();
-        changed
-            .headers
-            .as_mut()
-            .unwrap()
-            .insert("authorization".into(), "header-secret-two".into());
-        changed
-            .provider_options
-            .insert("runtime-secret".into(), json!("runtime-secret-two"));
-        changed
-            .sampling_params
-            .as_mut()
-            .unwrap()
-            .insert("custom".into(), json!("sampling-secret-two"));
-        changed.thinking_level_map.as_mut().unwrap().insert(
-            rpi_ai::ThinkingLevel::High,
-            Some("thinking-secret-two".into()),
-        );
-        changed.compat = Some(StreamingProtocolCompat::Other(json!({
-            "opaque": "compat-secret-two"
-        })));
-
-        let first = model_execution_fingerprint(&original);
-        let second = model_execution_fingerprint(&changed);
-
-        assert_eq!(first.sha256, second.sha256);
-        assert!(!first.complete);
-        for field in [
-            Exclusion::Endpoint,
-            Exclusion::Headers,
-            Exclusion::ProviderOptions,
-            Exclusion::SamplingParams,
-            Exclusion::ThinkingLevelMap,
-            Exclusion::OpaqueCompatibility,
-        ] {
-            assert!(first.excluded_fields.contains(&field));
-        }
-        let encoded = serde_json::to_string(&first).expect("fingerprint JSON");
-        assert!(!encoded.contains("secret-one"));
-        assert!(!encoded.contains("user:"));
-    }
-
-    /// Includes typed compatibility flags while unknown values remain omitted.
-    #[test]
-    fn includes_typed_compatibility_metadata() {
-        let mut original = model();
-        let mut changed = original.clone();
-        original.compat = Some(StreamingProtocolCompat::OpenaiCompletions(
-            OpenaiCompletionsCompat {
-                supports_strict_mode: Some(true),
-                ..OpenaiCompletionsCompat::default()
-            },
-        ));
-        changed.compat = Some(StreamingProtocolCompat::OpenaiCompletions(
-            OpenaiCompletionsCompat {
-                supports_strict_mode: Some(false),
-                ..OpenaiCompletionsCompat::default()
-            },
-        ));
-
-        assert_ne!(
-            model_execution_fingerprint(&original).sha256,
-            model_execution_fingerprint(&changed).sha256
-        );
-    }
-}
+#[path = "fingerprint_tests.rs"]
+mod tests;
