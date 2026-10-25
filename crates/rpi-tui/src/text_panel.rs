@@ -4,6 +4,10 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::{strip_ansi, theme, truncate_to_width, visible_width, Component, ThemeColors};
 
+const MAX_PANEL_TEXT_CHARS: usize = 4_096;
+const MAX_HIGHLIGHT_CHARS: usize = 256;
+const MAX_HIGHLIGHTS: usize = 32;
+
 /// Selects a theme color for one literal text highlight.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextPanelHighlightColor {
@@ -183,6 +187,7 @@ fn sanitize(text: &str) -> String {
     strip_ansi(text)
         .chars()
         .filter(|character| !character.is_control())
+        .take(MAX_PANEL_TEXT_CHARS)
         .collect()
 }
 
@@ -198,7 +203,16 @@ fn sanitize(text: &str) -> String {
 fn highlighted(text: &str, highlights: &[TextPanelHighlight], colors: &ThemeColors) -> String {
     let safe_highlights = highlights
         .iter()
-        .map(|highlight| (sanitize(&highlight.text), highlight.color))
+        .take(MAX_HIGHLIGHTS)
+        .map(|highlight| {
+            (
+                sanitize(&highlight.text)
+                    .chars()
+                    .take(MAX_HIGHLIGHT_CHARS)
+                    .collect::<String>(),
+                highlight.color,
+            )
+        })
         .filter(|(text, _)| !text.is_empty())
         .collect::<Vec<_>>();
     let mut result = String::new();

@@ -56,11 +56,15 @@ pub enum RemoteEvent {
     ProviderError {
         reason: String,
     },
+    /// Safe provider/model identity and authentication outcome evidence.
     ProviderAuthentication {
+        /// Upstream provider identity.
         #[serde(rename = "providerId")]
         provider_id: String,
+        /// Provider-scoped model identity.
         #[serde(rename = "modelId")]
         model_id: String,
+        /// `accepted` or `rejected`, without response details or credentials.
         outcome: String,
     },
     TurnStart,
