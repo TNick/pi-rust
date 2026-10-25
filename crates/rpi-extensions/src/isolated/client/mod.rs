@@ -198,6 +198,15 @@ impl IsolatedWorker {
         &self.providers
     }
 
+    /// Reports whether the worker's protocol connection has closed.
+    ///
+    /// # Returns
+    /// `true` after the reader has observed process exit or a protocol failure.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed.lock().map_or(true, |closed| closed.is_some())
+    }
+
     /// Executes one advertised tool in the worker process.
     ///
     /// # Parameters
