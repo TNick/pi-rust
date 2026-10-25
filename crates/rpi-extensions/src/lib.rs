@@ -97,7 +97,8 @@ pub use provider_reload::{
 };
 pub use registry::{
     assert_active, current_platform, platform_allows, BeforeAgentStartHandler, ExtensionRegistry,
-    ExtensionTool, ExtensionToolOrigin, ProviderManifest, RegisteredFlag, RegisteredHandler,
+    ExtensionTool, ExtensionToolOrigin, ProviderManifest, RegisteredCommand, RegisteredFlag,
+    RegisteredHandler,
     RegisteredOAuthProvider, RegisteredProvider, RegisteredRenderer, RegisteredRendererKind,
     RegisteredShortcut, RegistryEntry, RegistrySnapshot, ResourcesDiscoverHandler,
     DEFAULT_PRIORITY,

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::protocol::{
-    WorkerFrame, WorkerProviderRequest, WorkerProviderResponse, WorkerProviderSpec, WorkerToolSpec,
+    WorkerCommandSpec, WorkerFrame, WorkerProviderRequest, WorkerProviderResponse,
+    WorkerProviderSpec, WorkerToolSpec,
 };
 
 mod launch;
@@ -46,8 +47,11 @@ pub enum WorkerError {
     /// The worker reported a tool failure.
     #[error("plugin tool failed: {0}")]
     Tool(String),
-    /// The requested tool was not advertised by the worker.
-    #[error("plugin tool is not authorized: {0}")]
+    /// The worker reported a slash command failure.
+    #[error("plugin command failed: {0}")]
+    Command(String),
+    /// The requested tool or command was not advertised by the worker.
+    #[error("plugin registration is not authorized: {0}")]
     Unauthorized(String),
     /// The caller cancelled the request.
     #[error("plugin tool cancelled")]
@@ -71,6 +75,7 @@ pub struct IsolatedWorker {
     closed: Arc<Mutex<Option<String>>>,
     next_id: AtomicU64,
     tools: Vec<WorkerToolSpec>,
+    commands: Vec<WorkerCommandSpec>,
     providers: Vec<WorkerProviderSpec>,
     request_timeout: Duration,
 }
@@ -169,6 +174,7 @@ impl IsolatedWorker {
             closed,
             next_id: AtomicU64::new(1),
             tools: registrations.tools,
+            commands: registrations.commands,
             providers: registrations.providers,
             request_timeout: spec.request_timeout,
         })
@@ -177,6 +183,11 @@ impl IsolatedWorker {
     /// Returns the tools advertised by this worker.
     pub fn tools(&self) -> &[WorkerToolSpec] {
         &self.tools
+    }
+
+    /// Returns the slash commands advertised by this worker.
+    pub fn commands(&self) -> &[WorkerCommandSpec] {
+        &self.commands
     }
 
     /// Returns the providers and models advertised during worker startup.
@@ -200,6 +211,34 @@ impl IsolatedWorker {
     /// Returns an authorization, protocol, timeout, cancellation, or tool error.
     pub fn call_tool(&self, tool: &str, arguments: Value) -> Result<Value, WorkerError> {
         self.call_tool_cancellable(tool, arguments, None)
+    }
+
+    /// Executes one advertised slash command in the worker process.
+    ///
+    /// - `command`: Advertised command identifier.
+    /// - `arguments`: Raw text following the command name.
+    ///
+    /// # Returns
+    /// The plugin's structured user-interface response.
+    ///
+    /// # Errors
+    /// Returns an authorization, protocol, timeout, or command error.
+    pub fn call_command(&self, command: &str, arguments: &str) -> Result<Value, WorkerError> {
+        if !self
+            .commands
+            .iter()
+            .any(|advertised| advertised.name == command)
+        {
+            return Err(WorkerError::Unauthorized(command.to_owned()));
+        }
+        self.call_frame_cancellable(
+            WorkerFrame::CommandCall {
+                id: 0,
+                command: command.to_owned(),
+                arguments: arguments.to_owned(),
+            },
+            None,
+        )
     }
 
     /// Executes one advertised tool with optional cancellation.
@@ -290,8 +329,10 @@ impl IsolatedWorker {
             return Err(WorkerError::Closed(error));
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let command_call = matches!(frame, WorkerFrame::CommandCall { .. });
         match &mut frame {
             WorkerFrame::ToolCall { id: request_id, .. }
+            | WorkerFrame::CommandCall { id: request_id, .. }
             | WorkerFrame::ProviderCall { id: request_id, .. } => *request_id = id,
             _ => return Err(WorkerError::Protocol("invalid worker request".to_owned())),
         }
@@ -324,7 +365,13 @@ impl IsolatedWorker {
             }
             match receiver.recv_timeout(remaining.min(Duration::from_millis(25))) {
                 Ok(Ok(result)) => return Ok(result),
-                Ok(Err(error)) => return Err(WorkerError::Tool(error)),
+                Ok(Err(error)) => {
+                    return Err(if command_call {
+                        WorkerError::Command(error)
+                    } else {
+                        WorkerError::Tool(error)
+                    });
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     let error = self

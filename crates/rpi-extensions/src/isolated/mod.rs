@@ -3,7 +3,7 @@
 //! The host never maps a plugin cdylib into its own address space. It starts a
 //! caller-selected worker executable, owns the child process tree, and exchanges
 //! newline-delimited [`protocol::WorkerFrame`] values over piped stdio. A worker
-//! loads plugins and executes registered tools inside its own process. Plugin
+//! loads plugins and executes registered tools and slash commands inside its own process. Plugin
 //! `runtime_action` calls are relayed as [`protocol::WorkerFrame::HostCall`]
 //! frames and resolved only by the host's [`WorkerHostHandler`]; the generic
 //! [`AllowlistedHostHandler`] can enforce a configured capability allowlist.
@@ -29,14 +29,14 @@ pub use client::{
     WorkerLauncher, WorkerNetworkPolicy, WorkerProvider, WorkerSandboxGuarantees,
     WorkerSandboxPolicy, WorkerSecretPolicy,
 };
-pub use plugin::{run_plugin_worker, PluginWorker};
+pub use plugin::{PluginWorker, run_plugin_worker};
 pub use protocol::{
-    WorkerFrame, WorkerProviderOptions, WorkerProviderOutcome, WorkerProviderRequest,
-    WorkerProviderResponse, WorkerProviderSpec, WorkerRegistrations, WorkerToolSpec,
-    WORKER_PROTOCOL,
+    WORKER_PROTOCOL, WorkerCommandSpec, WorkerFrame, WorkerProviderOptions, WorkerProviderOutcome,
+    WorkerProviderRequest, WorkerProviderResponse, WorkerProviderSpec, WorkerRegistrations,
+    WorkerToolSpec,
 };
 pub use worker::{
-    serve_worker, serve_worker_stdio, WorkerFrameWriter, WorkerHandler, WorkerHostClient,
+    WorkerFrameWriter, WorkerHandler, WorkerHostClient, serve_worker, serve_worker_stdio,
 };
 
 /// Loads plugins selected by a host into a worker process and serves the host.

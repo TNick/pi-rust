@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,7 +11,8 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::protocol::{
-    WorkerFrame, WorkerProviderRequest, WorkerProviderResponse, WorkerProviderSpec, WorkerToolSpec,
+    WorkerCommandSpec, WorkerFrame, WorkerProviderRequest, WorkerProviderResponse,
+    WorkerProviderSpec, WorkerToolSpec,
 };
 
 #[cfg(test)]
@@ -161,6 +162,11 @@ pub trait WorkerHandler: Send + Sync {
         Vec::new()
     }
 
+    /// Returns slash commands the host may expose and invoke.
+    fn commands(&self) -> Vec<WorkerCommandSpec> {
+        Vec::new()
+    }
+
     /// Prepares worker state with the host-capability client.
     ///
     /// # Parameters
@@ -213,6 +219,26 @@ pub trait WorkerHandler: Send + Sync {
         _cancellation: CancellationToken,
     ) -> Result<WorkerProviderResponse, String> {
         Err("worker provider calls are not supported".to_owned())
+    }
+
+    /// Executes one registered plugin slash command inside the worker process.
+    ///
+    /// - `command`: Exact command identifier advertised at startup.
+    /// - `arguments`: Raw text after the command name.
+    /// - `cancellation`: Shared host cancellation token.
+    ///
+    /// # Returns
+    /// The structured command UI response.
+    ///
+    /// # Errors
+    /// Returns a safe failure when command execution is unavailable.
+    fn call_command(
+        &self,
+        _command: &str,
+        _arguments: String,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("worker slash commands are not supported".to_owned())
     }
 }
 
@@ -268,9 +294,10 @@ where
     handler
         .start(Arc::clone(&host))
         .map_err(std::io::Error::other)?;
-    writer.write_frame(&WorkerFrame::hello_with_providers(
+    writer.write_frame(&WorkerFrame::hello_with_registrations(
         handler.tools(),
         handler.providers(),
+        handler.commands(),
     ))?;
     let cancellations: Arc<Mutex<HashMap<u64, CancellationToken>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -319,6 +346,35 @@ where
                         |error| WorkerFrame::ProviderError { id, error },
                         |response| WorkerFrame::ProviderResult { id, response },
                     );
+                    if let Ok(mut cancellations) = cancellations.lock() {
+                        cancellations.remove(&id);
+                    }
+                    let _ = writer.write_frame(&response);
+                });
+                if let Ok(mut active) = active.lock() {
+                    active.retain(|handle| !handle.is_finished());
+                    active.push(handle);
+                }
+            }
+            WorkerFrame::CommandCall {
+                id,
+                command,
+                arguments,
+            } => {
+                let cancellation = CancellationToken::new();
+                if let Ok(mut cancellations) = cancellations.lock() {
+                    cancellations.insert(id, cancellation.clone());
+                }
+                let handler = Arc::clone(&handler);
+                let writer = Arc::clone(&writer);
+                let cancellations = Arc::clone(&cancellations);
+                let handle = thread::spawn(move || {
+                    let response = handler
+                        .call_command(&command, arguments, cancellation)
+                        .map_or_else(
+                            |error| WorkerFrame::CommandError { id, error },
+                            |result| WorkerFrame::CommandResult { id, result },
+                        );
                     if let Ok(mut cancellations) = cancellations.lock() {
                         cancellations.remove(&id);
                     }

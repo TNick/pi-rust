@@ -7,10 +7,10 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::isolated::protocol::{
-    WorkerFrame, WorkerProviderOptions, WorkerProviderOutcome, WorkerProviderRequest,
-    WorkerProviderResponse, WorkerProviderSpec,
+    WorkerCommandSpec, WorkerFrame, WorkerProviderOptions, WorkerProviderOutcome,
+    WorkerProviderRequest, WorkerProviderResponse, WorkerProviderSpec,
 };
-use crate::isolated::worker::{serve_worker, WorkerHandler};
+use crate::isolated::worker::{WorkerHandler, serve_worker};
 
 /// Captures provider calls made by the worker service test.
 struct ProviderFixture {
@@ -35,6 +35,14 @@ impl WorkerHandler for ProviderFixture {
                 "fixture-provider",
                 "https://fixture.example.test/v1",
             )],
+        }]
+    }
+
+    /// Advertises one command for the worker protocol test.
+    fn commands(&self) -> Vec<WorkerCommandSpec> {
+        vec![WorkerCommandSpec {
+            name: "fixture-command".to_owned(),
+            description: "Returns a fixture message.".to_owned(),
         }]
     }
 
@@ -91,6 +99,29 @@ impl WorkerHandler for ProviderFixture {
     ) -> Result<Value, String> {
         Err("fixture does not support tools".to_owned())
     }
+
+    /// Returns an echo response for one registered fixture command.
+    ///
+    /// - `command`: Advertised command name.
+    /// - `arguments`: Raw arguments supplied by the host.
+    /// - `_cancellation`: Worker request cancellation token.
+    ///
+    /// # Returns
+    /// A safe message response containing the supplied arguments.
+    ///
+    /// # Errors
+    /// Returns an error when the requested command name is not recognized.
+    fn call_command(
+        &self,
+        command: &str,
+        arguments: String,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        if command != "fixture-command" {
+            return Err("unknown fixture command".to_owned());
+        }
+        Ok(serde_json::json!({"kind": "message", "text": arguments}))
+    }
 }
 
 /// Shares captured worker output with the test after the service exits.
@@ -144,6 +175,16 @@ fn provider_registration_and_request_round_trip_through_worker_protocol() {
     let mut input = request_frame.encode().expect("provider frame encoding");
     input.push(b'\n');
     input.extend_from_slice(
+        &WorkerFrame::CommandCall {
+            id: 8,
+            command: "fixture-command".to_owned(),
+            arguments: "hello from host".to_owned(),
+        }
+        .encode()
+        .expect("command frame encoding"),
+    );
+    input.push(b'\n');
+    input.extend_from_slice(
         &WorkerFrame::Shutdown
             .encode()
             .expect("shutdown frame encoding"),
@@ -177,6 +218,7 @@ fn provider_registration_and_request_round_trip_through_worker_protocol() {
         .validate_hello_registrations()
         .expect("provider catalog hello");
     assert!(registrations.tools.is_empty());
+    assert_eq!(registrations.commands[0].name, "fixture-command");
     assert_eq!(registrations.providers[0].id, "fixture-provider");
     assert_eq!(registrations.providers[0].models[0].id, "fixture-model");
     assert!(matches!(
@@ -188,6 +230,11 @@ fn provider_registration_and_request_round_trip_through_worker_protocol() {
                 ..
             },
         }
+    ));
+    assert!(matches!(
+        frames.iter().find(|frame| matches!(frame, WorkerFrame::CommandResult { id: 8, .. })),
+        Some(WorkerFrame::CommandResult { id: 8, result })
+            if result["text"] == "hello from host"
     ));
     assert!(!String::from_utf8_lossy(&output).contains("secret-material"));
 }

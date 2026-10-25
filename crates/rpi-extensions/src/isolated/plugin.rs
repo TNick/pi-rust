@@ -5,20 +5,20 @@ use std::sync::{Arc, Mutex};
 
 use rpi_agent::agent_tool::AgentTool;
 use rpi_agent::types::{AgentToolResult, TextContentOrImage};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::actions::{ActionBridge, RuntimeActionHost};
-use crate::loader::{load_session_mixed, PluginKeepalive};
+use crate::loader::{PluginKeepalive, load_session_mixed};
 use crate::registry::ExtensionTool;
 use crate::tool::PluginToolAdapter;
 use crate::{NullDiagnostics, PluginDiagnostics};
 
 use super::protocol::{
-    WorkerProviderOptions, WorkerProviderOutcome, WorkerProviderRequest, WorkerProviderResponse,
-    WorkerProviderSpec, WorkerToolSpec,
+    WorkerCommandSpec, WorkerProviderOptions, WorkerProviderOutcome, WorkerProviderRequest,
+    WorkerProviderResponse, WorkerProviderSpec, WorkerToolSpec,
 };
-use super::worker::{serve_worker_stdio, WorkerHandler, WorkerHostClient};
+use super::worker::{WorkerHandler, WorkerHostClient, serve_worker_stdio};
 
 /// Native plugin set loaded inside a worker process.
 ///
@@ -48,6 +48,8 @@ struct LoadedPlugins {
     keepalive: Arc<PluginKeepalive>,
     /// Registered tools whose callbacks live inside the worker's libraries.
     tools: Vec<ExtensionTool>,
+    /// Registered slash command callbacks that remain inside the worker.
+    commands: Vec<crate::registry::RegisteredCommand>,
     /// Provider implementations whose callbacks remain inside the worker.
     providers: Vec<Arc<dyn rpi_ai::Provider>>,
     /// Loaded plugin paths for diagnostics.
@@ -143,6 +145,26 @@ impl WorkerHandler for PluginWorker {
             .unwrap_or_default()
     }
 
+    /// Projects registered slash commands into the worker protocol.
+    fn commands(&self) -> Vec<WorkerCommandSpec> {
+        let Ok(loaded) = self.loaded.lock() else {
+            return Vec::new();
+        };
+        loaded
+            .as_ref()
+            .map(|loaded| {
+                loaded
+                    .commands
+                    .iter()
+                    .map(|command| WorkerCommandSpec {
+                        name: command.name.trim_start_matches('/').to_owned(),
+                        description: command.description.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Loads plugins with a bridge that relays runtime actions to the host.
     ///
     /// # Parameters
@@ -174,8 +196,12 @@ impl WorkerHandler for PluginWorker {
             .snapshot()
             .map(|snapshot| snapshot.tools().to_vec())
             .unwrap_or_default();
+        let commands = session
+            .snapshot()
+            .map(|snapshot| snapshot.commands().to_vec())
+            .unwrap_or_default();
         let providers = crate::PluggableProvider::from_session(&session, runtime.handle().clone());
-        if tools.is_empty() && providers.is_empty() {
+        if tools.is_empty() && commands.is_empty() && providers.is_empty() {
             return Err("no plugin tool or provider registered in the worker".to_owned());
         }
         let loaded_paths = session.loaded_paths().to_vec();
@@ -187,6 +213,7 @@ impl WorkerHandler for PluginWorker {
         *loaded = Some(LoadedPlugins {
             keepalive,
             tools,
+            commands,
             providers,
             loaded_paths,
             runtime,
@@ -306,6 +333,68 @@ impl WorkerHandler for PluginWorker {
                 .await
             })
         };
+        result
+    }
+
+    /// Invokes a registered slash command callback inside the worker.
+    ///
+    /// - `command_name`: Exact normalized command identifier.
+    /// - `arguments`: Raw command arguments from the host.
+    /// - `cancellation`: Shared host cancellation token.
+    ///
+    /// # Returns
+    /// The plugin's structured command UI response.
+    ///
+    /// # Errors
+    /// Returns a safe error when the command is unknown, cancelled, panics, or
+    /// returns invalid JSON.
+    fn call_command(
+        &self,
+        command_name: &str,
+        arguments: String,
+        cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        if cancellation.is_cancelled() {
+            return Err("plugin command cancelled".to_owned());
+        }
+        let loaded = self
+            .loaded
+            .lock()
+            .map_err(|_| "worker plugin state is poisoned".to_owned())?;
+        let loaded = loaded
+            .as_ref()
+            .ok_or_else(|| "worker plugins are not loaded".to_owned())?;
+        let command = loaded
+            .commands
+            .iter()
+            .find(|command| command.name.trim_start_matches('/') == command_name)
+            .ok_or_else(|| "plugin command is not registered".to_owned())?;
+        let input = serde_json::json!({
+            "args": arguments,
+            "command": format!("/{command_name}"),
+        })
+        .to_string();
+        let mut output = rpi_plugin_sdk::StbString::empty();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let status = (command.handler)(
+                rpi_plugin_sdk::StbStringRef::from_str(&input),
+                &mut output,
+                command.user_data,
+            );
+            // SAFETY: the registered callback transfers output to its producer.
+            let output = unsafe {
+                rpi_plugin_sdk::callbacks::OwnedString::from_raw(
+                    output,
+                    Some(crate::host_free_string),
+                )
+            };
+            if status != 0 {
+                return Err("plugin command callback failed".to_owned());
+            }
+            serde_json::from_str(&output.to_string_lossy())
+                .map_err(|_| "plugin command returned invalid JSON".to_owned())
+        }))
+        .map_err(|_| "plugin command callback panicked".to_owned())?;
         result
     }
 }

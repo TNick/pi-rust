@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::ChildStdin;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use serde_json::Value;
 
@@ -52,6 +52,12 @@ pub(super) fn read_worker(
                 resolve(&pending, id, Ok(result));
             }
             WorkerFrame::ToolError { id, error } => {
+                resolve(&pending, id, Err(error));
+            }
+            WorkerFrame::CommandResult { id, result } => {
+                resolve(&pending, id, Ok(result));
+            }
+            WorkerFrame::CommandError { id, error } => {
                 resolve(&pending, id, Err(error));
             }
             WorkerFrame::ProviderResult { id, response } => match serde_json::to_value(response) {

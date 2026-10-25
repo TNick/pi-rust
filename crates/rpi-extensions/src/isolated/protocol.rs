@@ -19,6 +19,16 @@ pub struct WorkerToolSpec {
     pub parameters: Value,
 }
 
+/// One plugin slash command advertised by an isolated worker.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerCommandSpec {
+    /// Host-stamped command identifier without a leading slash.
+    pub name: String,
+    /// Safe user-facing command description.
+    pub description: String,
+}
+
 /// One provider and its host-safe model catalog advertised by a worker.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +45,9 @@ pub struct WorkerProviderSpec {
 pub struct WorkerRegistrations {
     /// Worker tools available for host authorization.
     pub tools: Vec<WorkerToolSpec>,
+    /// Slash commands available for host-mediated invocation.
+    #[serde(default)]
+    pub commands: Vec<WorkerCommandSpec>,
     /// Provider models available for host catalog publication.
     pub providers: Vec<WorkerProviderSpec>,
 }
@@ -131,6 +144,9 @@ pub enum WorkerFrame {
         /// Providers and models the worker can execute.
         #[serde(default)]
         providers: Vec<WorkerProviderSpec>,
+        /// Slash commands the worker can execute.
+        #[serde(default)]
+        commands: Vec<WorkerCommandSpec>,
     },
     /// Host requests one registered tool invocation.
     ToolCall {
@@ -150,6 +166,29 @@ pub enum WorkerFrame {
     },
     /// Worker reports a safe tool failure.
     ToolError {
+        /// Correlation identity.
+        id: u64,
+        /// Bounded failure text.
+        error: String,
+    },
+    /// Host requests one registered slash command invocation.
+    CommandCall {
+        /// Correlation identity.
+        id: u64,
+        /// Registered command identifier.
+        command: String,
+        /// Raw command arguments supplied after the command name.
+        arguments: String,
+    },
+    /// Worker returns a command's structured UI response.
+    CommandResult {
+        /// Correlation identity.
+        id: u64,
+        /// Structured UI result from the plugin command callback.
+        result: Value,
+    },
+    /// Worker reports a safe command failure.
+    CommandError {
         /// Correlation identity.
         id: u64,
         /// Bounded failure text.
@@ -221,6 +260,7 @@ impl WorkerFrame {
             protocol: WORKER_PROTOCOL.to_owned(),
             tools,
             providers: Vec::new(),
+            commands: Vec::new(),
         }
     }
 
@@ -240,6 +280,28 @@ impl WorkerFrame {
             protocol: WORKER_PROTOCOL.to_owned(),
             tools,
             providers,
+            commands: Vec::new(),
+        }
+    }
+
+    /// Builds readiness with tools, providers, and slash commands.
+    ///
+    /// - `tools`: Worker tools the host may authorize.
+    /// - `providers`: Credential-free provider catalog advertised by the worker.
+    /// - `commands`: Slash commands the host may expose and invoke.
+    ///
+    /// # Returns
+    /// A `hello` frame stamped with the current protocol version.
+    pub fn hello_with_registrations(
+        tools: Vec<WorkerToolSpec>,
+        providers: Vec<WorkerProviderSpec>,
+        commands: Vec<WorkerCommandSpec>,
+    ) -> Self {
+        Self::Hello {
+            protocol: WORKER_PROTOCOL.to_owned(),
+            tools,
+            providers,
+            commands,
         }
     }
 
@@ -298,9 +360,11 @@ impl WorkerFrame {
                 protocol,
                 tools,
                 providers,
+                commands,
             } if protocol == WORKER_PROTOCOL => Ok(WorkerRegistrations {
                 tools: tools.clone(),
                 providers: providers.clone(),
+                commands: commands.clone(),
             }),
             Self::Hello { .. } => Err("plugin worker protocol version mismatch".to_owned()),
             _ => Err("plugin worker did not start with a hello frame".to_owned()),
