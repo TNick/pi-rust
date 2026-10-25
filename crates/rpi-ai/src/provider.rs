@@ -3,7 +3,7 @@
 //! provider's wire format directly; it calls `stream_simple` and consumes the
 //! returned [`AssistantMessageEventStream`].
 
-use crate::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
+use crate::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
 use crate::model::Model;
 use crate::provider_option_attestation::ProviderOptionsAttestation;
 use crate::types::{
@@ -348,6 +348,7 @@ pub const DEFAULT_LLM_API_TIMEOUT: Duration = Duration::from_secs(600);
 /// - `applied_values`: Allowlisted scalar settings found in the final body.
 /// - `request_body_sha256`: Digest of the exact prepared JSON body.
 /// - `request_header_sha256`: Digest of allowlisted prepared header values.
+/// - `request_effect_sha256`: Opaque digest of the complete prepared request when available.
 /// - `provider_options`: Opaque per-option application status and value digests.
 /// - `omitted_categories`: Sensitive or opaque request categories omitted.
 /// - `complete`: Whether every request-affecting setting is represented.
@@ -385,7 +386,7 @@ pub struct AppliedRequestSettings {
     pub complete: bool,
 }
 
-/// Callback invoked after a provider assembles the final JSON request body.
+/// Callback invoked after a provider assembles its final prepared request report.
 pub type AppliedRequestSettingsCallback = Arc<dyn Fn(AppliedRequestSettings) + Send + Sync>;
 
 /// Cache-retention hint passed to a provider. Mirrors TS `CacheRetention`.
@@ -573,9 +574,9 @@ impl SimpleStreamOptions {
 #[cfg(test)]
 mod tests {
     use super::{
+        AppliedRequestSettings, AppliedRequestSettingsCallback, DEFAULT_LLM_API_TIMEOUT, Provider,
+        ProviderContinuation, RequestSecret, SecretMaterial, SimpleStreamOptions,
         report_applied_request_settings, report_applied_request_settings_with_effect,
-        AppliedRequestSettings, AppliedRequestSettingsCallback, Provider, ProviderContinuation,
-        RequestSecret, SecretMaterial, SimpleStreamOptions, DEFAULT_LLM_API_TIMEOUT,
     };
     use crate::model::Model;
     use crate::types::Api;
@@ -730,9 +731,11 @@ mod tests {
         let encoded = serde_json::to_string(report).expect("report JSON");
         assert!(!encoded.contains("private-header-sentinel"));
         assert!(!encoded.contains("private-custom-sentinel"));
-        assert!(report
-            .omitted_categories
-            .contains(&"unclassified_headers".to_owned()));
+        assert!(
+            report
+                .omitted_categories
+                .contains(&"unclassified_headers".to_owned())
+        );
         assert!(!report.complete);
     }
 
