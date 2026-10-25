@@ -49,8 +49,9 @@ Implemented with `bwrap` and reports full guarantees.
 Enforced:
 
 - filesystem: only the declared absolute read roots are mounted read-only and
-  write roots read-write; `/proc`, `/dev`, and a private `/tmp` are synthetic
-  sandbox mounts;
+  write roots read-write; `/dev` and a private `/tmp` are synthetic sandbox
+  mounts. `/proc` is intentionally absent so hosts that prohibit mounting proc
+  inside a user namespace can still use the remaining namespace restrictions;
 - network: `--unshare-all` denies network, `--share-net` re-attaches the host
   network only for `WorkerNetworkPolicy::Allow`;
 - secrets: `--clearenv` removes the host environment; only

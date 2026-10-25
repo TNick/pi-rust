@@ -236,7 +236,9 @@ impl WorkerLauncher for HostProcessLauncher {
 ///
 /// It requires `bwrap` on the host and a kernel that permits the requested
 /// namespaces. Missing `bwrap`, unsupported namespaces, or invalid roots fail
-/// the launch; the launcher never falls back to an unsandboxed process.
+/// the launch; the launcher never falls back to an unsandboxed process. `/proc`
+/// is left unmounted because some hosts prohibit mounting proc inside a user
+/// namespace; the isolated worker protocol does not require it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LinuxBubblewrapLauncher;
 
@@ -283,8 +285,6 @@ impl WorkerLauncher for LinuxBubblewrapLauncher {
             .arg("--cap-drop")
             .arg("ALL")
             .arg("--clearenv")
-            .arg("--proc")
-            .arg("/proc")
             .arg("--dev")
             .arg("/dev")
             .arg("--tmpfs")
@@ -342,6 +342,10 @@ fn validate_roots(filesystem: &WorkerFilesystemPolicy) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "launch_tests.rs"]
+mod tests;
 
 /// Host policy for worker-initiated capability calls.
 pub trait WorkerHostHandler: Send + Sync {
