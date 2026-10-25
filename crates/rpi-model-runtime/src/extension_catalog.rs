@@ -10,6 +10,48 @@ use rpi_extensions::{
 
 use crate::{ModelCatalog, ModelCatalogSnapshot};
 
+/// Failure while staging or publishing an extension catalog generation.
+#[derive(Debug)]
+pub enum ExtensionCatalogRefreshError<E> {
+    /// Candidate loading, policy checks, or catalog derivation failed.
+    Stage(E),
+    /// Atomic publication rejected the staged candidate.
+    Publish(GenerationError),
+}
+
+/// Stages a complete extension generation and publishes it with its catalog.
+///
+/// The closure owns package discovery, trust/root authorization, loading, and
+/// provider resolution. It must return a fully validated candidate and the
+/// complete ordered model set. The closure runs before publication; on failure
+/// the live session and catalog remain untouched. Successful staging delegates
+/// to the shared generation gate, so paired readers observe one generation.
+///
+/// # Parameters
+/// - `slot`: Shared extension generation slot.
+/// - `catalog`: Shared provider/model catalog.
+/// - `stage`: Host policy and staging operation that returns the candidate and
+///   its complete catalog rows.
+///
+/// # Returns
+/// The published generation and the retired previous generation.
+///
+/// # Errors
+/// Returns `Stage` when the host staging closure fails, or `Publish` when the
+/// shared publication gate rejects the candidate.
+pub fn refresh_extension_catalog_generation<E, F>(
+    slot: &ExtensionGenerationSlot,
+    catalog: &ModelCatalog,
+    stage: F,
+) -> Result<PublishedGeneration, ExtensionCatalogRefreshError<E>>
+where
+    F: FnOnce() -> Result<(GenerationCandidate, Vec<Model>), E>,
+{
+    let (candidate, models) = stage().map_err(ExtensionCatalogRefreshError::Stage)?;
+    publish_extension_catalog_generation(slot, catalog, candidate, models)
+        .map_err(ExtensionCatalogRefreshError::Publish)
+}
+
 /// One coherent view of the live extension session and provider catalog.
 ///
 /// Read this through [`snapshot_extension_catalog_generation`] so publication
@@ -86,7 +128,8 @@ mod tests {
     use rpi_extensions::{ExtensionGenerationSlot, ExtensionSession, GenerationCandidate};
 
     use crate::{
-        publish_extension_catalog_generation, snapshot_extension_catalog_generation, ModelCatalog,
+        publish_extension_catalog_generation, refresh_extension_catalog_generation,
+        snapshot_extension_catalog_generation, ExtensionCatalogRefreshError, ModelCatalog,
     };
 
     /// Publishes model rows and their extension session as one readable generation.
@@ -170,5 +213,70 @@ mod tests {
         assert_eq!(snapshot.catalog.models[0].provider, "provider-b");
         writer.join().expect("publication thread settles");
         reader.join().expect("snapshot reader settles");
+    }
+
+    /// Leaves the published session and catalog unchanged when staging fails.
+    #[test]
+    fn failed_refresh_keeps_the_previous_generation_and_catalog() {
+        let slot = ExtensionGenerationSlot::empty();
+        let catalog = ModelCatalog::new();
+        let initial = Model::new(
+            "model-a",
+            "Model A",
+            Api::OpenaiCompletions,
+            "provider-a",
+            "https://example.test",
+        );
+        publish_extension_catalog_generation(
+            &slot,
+            &catalog,
+            GenerationCandidate::new(ExtensionSession::none()),
+            vec![initial.clone()],
+        )
+        .expect("publish initial generation");
+        let before = snapshot_extension_catalog_generation(&slot, &catalog);
+
+        let result = refresh_extension_catalog_generation(&slot, &catalog, || {
+            Err::<(GenerationCandidate, Vec<Model>), _>("package trust denied")
+        });
+
+        assert!(matches!(
+            result,
+            Err(ExtensionCatalogRefreshError::Stage(_))
+        ));
+        let after = snapshot_extension_catalog_generation(&slot, &catalog);
+        assert_eq!(after.extension.id(), before.extension.id());
+        assert_eq!(after.catalog.revision, before.catalog.revision);
+        assert_eq!(after.catalog.models, vec![initial]);
+    }
+
+    /// Stages and publishes the replacement session and full model set together.
+    #[test]
+    fn refresh_publishes_staged_session_and_complete_catalog() {
+        let slot = ExtensionGenerationSlot::empty();
+        let catalog = ModelCatalog::new();
+        let model = Model::new(
+            "model-b",
+            "Model B",
+            Api::OpenaiCompletions,
+            "provider-b",
+            "https://example.test",
+        );
+
+        let published = refresh_extension_catalog_generation(&slot, &catalog, || {
+            Ok::<_, &'static str>((
+                GenerationCandidate::new(ExtensionSession::none()),
+                vec![model.clone()],
+            ))
+        })
+        .expect("publish staged provider package generation");
+        let paired = snapshot_extension_catalog_generation(&slot, &catalog);
+
+        assert_eq!(paired.extension.id(), published.current.id());
+        assert_eq!(
+            paired.extension.catalog_revision(),
+            Some(paired.catalog.revision)
+        );
+        assert_eq!(paired.catalog.models, vec![model]);
     }
 }

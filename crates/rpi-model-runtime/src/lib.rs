@@ -36,8 +36,8 @@ pub use credentials::{
     ProtectedCredentialResolver, ResolvedCredential,
 };
 pub use extension_catalog::{
-    publish_extension_catalog_generation, snapshot_extension_catalog_generation,
-    ExtensionCatalogSnapshot,
+    publish_extension_catalog_generation, refresh_extension_catalog_generation,
+    snapshot_extension_catalog_generation, ExtensionCatalogRefreshError, ExtensionCatalogSnapshot,
 };
 pub use fingerprint::{
     model_configuration_fingerprint, model_execution_fingerprint, ModelConfigurationFingerprint,
