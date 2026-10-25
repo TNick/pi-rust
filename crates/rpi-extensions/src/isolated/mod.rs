@@ -26,11 +26,15 @@ pub mod worker;
 pub use client::{
     AllowlistedHostHandler, HostProcessLauncher, IsolatedWorker, LinuxBubblewrapLauncher,
     WorkerError, WorkerFilesystemPolicy, WorkerHostHandler, WorkerIsolation, WorkerLaunchSpec,
-    WorkerLauncher, WorkerNetworkPolicy, WorkerSandboxGuarantees, WorkerSandboxPolicy,
-    WorkerSecretPolicy,
+    WorkerLauncher, WorkerNetworkPolicy, WorkerProvider, WorkerSandboxGuarantees,
+    WorkerSandboxPolicy, WorkerSecretPolicy,
 };
 pub use plugin::{run_plugin_worker, PluginWorker};
-pub use protocol::{WorkerFrame, WorkerToolSpec, WORKER_PROTOCOL};
+pub use protocol::{
+    WorkerFrame, WorkerProviderOptions, WorkerProviderOutcome, WorkerProviderRequest,
+    WorkerProviderResponse, WorkerProviderSpec, WorkerRegistrations, WorkerToolSpec,
+    WORKER_PROTOCOL,
+};
 pub use worker::{
     serve_worker, serve_worker_stdio, WorkerFrameWriter, WorkerHandler, WorkerHostClient,
 };

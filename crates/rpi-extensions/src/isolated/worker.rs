@@ -10,7 +10,13 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::{WorkerFrame, WorkerToolSpec};
+use super::protocol::{
+    WorkerFrame, WorkerProviderRequest, WorkerProviderResponse, WorkerProviderSpec, WorkerToolSpec,
+};
+
+#[cfg(test)]
+#[path = "worker/tests.rs"]
+mod tests;
 
 /// Writes one worker frame to the host command stream.
 pub trait WorkerFrameWriter: Send + Sync {
@@ -146,6 +152,15 @@ pub trait WorkerHandler: Send + Sync {
     /// Returns the tools this worker advertises to its host.
     fn tools(&self) -> Vec<WorkerToolSpec>;
 
+    /// Returns providers and models this worker is able to execute.
+    ///
+    /// # Returns
+    /// Credential-free provider registrations. Workers without provider
+    /// support may use the empty default.
+    fn providers(&self) -> Vec<WorkerProviderSpec> {
+        Vec::new()
+    }
+
     /// Prepares worker state with the host-capability client.
     ///
     /// # Parameters
@@ -179,6 +194,26 @@ pub trait WorkerHandler: Send + Sync {
         arguments: Value,
         cancellation: CancellationToken,
     ) -> Result<Value, String>;
+
+    /// Executes one provider request inside the worker process.
+    ///
+    /// # Parameters
+    /// - `request`: Host-authorized provider, model, context, options, and
+    ///   request-only credential.
+    /// - `cancellation`: Shared host cancellation token.
+    ///
+    /// # Returns
+    /// A completed assistant response.
+    ///
+    /// # Errors
+    /// Returns a safe provider failure.
+    fn call_provider(
+        &self,
+        _request: WorkerProviderRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<WorkerProviderResponse, String> {
+        Err("worker provider calls are not supported".to_owned())
+    }
 }
 
 /// Serves one plugin worker over a newline-delimited stream pair.
@@ -233,7 +268,10 @@ where
     handler
         .start(Arc::clone(&host))
         .map_err(std::io::Error::other)?;
-    writer.write_frame(&WorkerFrame::hello(handler.tools()))?;
+    writer.write_frame(&WorkerFrame::hello_with_providers(
+        handler.tools(),
+        handler.providers(),
+    ))?;
     let cancellations: Arc<Mutex<HashMap<u64, CancellationToken>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let active: Arc<Mutex<Vec<thread::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -258,6 +296,29 @@ where
                             |error| WorkerFrame::ToolError { id, error },
                             |result| WorkerFrame::ToolResult { id, result },
                         );
+                    if let Ok(mut cancellations) = cancellations.lock() {
+                        cancellations.remove(&id);
+                    }
+                    let _ = writer.write_frame(&response);
+                });
+                if let Ok(mut active) = active.lock() {
+                    active.retain(|handle| !handle.is_finished());
+                    active.push(handle);
+                }
+            }
+            WorkerFrame::ProviderCall { id, request } => {
+                let cancellation = CancellationToken::new();
+                if let Ok(mut cancellations) = cancellations.lock() {
+                    cancellations.insert(id, cancellation.clone());
+                }
+                let handler = Arc::clone(&handler);
+                let writer = Arc::clone(&writer);
+                let cancellations = Arc::clone(&cancellations);
+                let handle = thread::spawn(move || {
+                    let response = handler.call_provider(request, cancellation).map_or_else(
+                        |error| WorkerFrame::ProviderError { id, error },
+                        |response| WorkerFrame::ProviderResult { id, response },
+                    );
                     if let Ok(mut cancellations) = cancellations.lock() {
                         cancellations.remove(&id);
                     }

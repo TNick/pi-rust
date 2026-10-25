@@ -13,15 +13,19 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::{WorkerFrame, WorkerToolSpec};
+use super::protocol::{
+    WorkerFrame, WorkerProviderRequest, WorkerProviderResponse, WorkerProviderSpec, WorkerToolSpec,
+};
 
 mod launch;
+mod provider;
 mod reader;
 pub use launch::{
     AllowlistedHostHandler, HostProcessLauncher, LinuxBubblewrapLauncher, WorkerFilesystemPolicy,
     WorkerHostHandler, WorkerIsolation, WorkerLaunchSpec, WorkerLauncher, WorkerNetworkPolicy,
     WorkerSandboxGuarantees, WorkerSandboxPolicy, WorkerSecretPolicy,
 };
+pub use provider::WorkerProvider;
 use reader::read_worker;
 
 /// Failure from one isolated worker process.
@@ -67,6 +71,7 @@ pub struct IsolatedWorker {
     closed: Arc<Mutex<Option<String>>>,
     next_id: AtomicU64,
     tools: Vec<WorkerToolSpec>,
+    providers: Vec<WorkerProviderSpec>,
     request_timeout: Duration,
 }
 
@@ -140,8 +145,8 @@ impl IsolatedWorker {
             });
         }
 
-        let tools = match hello_receiver.recv_timeout(spec.startup_timeout) {
-            Ok(Ok(tools)) => tools,
+        let mut registrations = match hello_receiver.recv_timeout(spec.startup_timeout) {
+            Ok(Ok(registrations)) => registrations,
             Ok(Err(error)) => {
                 process_tree.kill();
                 let _ = child.kill();
@@ -155,6 +160,7 @@ impl IsolatedWorker {
                 return Err(WorkerError::StartupTimeout);
             }
         };
+        sanitize_provider_registrations(&mut registrations.providers)?;
         Ok(Self {
             child,
             process_tree: Some(process_tree),
@@ -162,7 +168,8 @@ impl IsolatedWorker {
             pending,
             closed,
             next_id: AtomicU64::new(1),
-            tools,
+            tools: registrations.tools,
+            providers: registrations.providers,
             request_timeout: spec.request_timeout,
         })
     }
@@ -170,6 +177,14 @@ impl IsolatedWorker {
     /// Returns the tools advertised by this worker.
     pub fn tools(&self) -> &[WorkerToolSpec] {
         &self.tools
+    }
+
+    /// Returns the providers and models advertised during worker startup.
+    ///
+    /// # Returns
+    /// Credential-free provider registrations in worker order.
+    pub fn providers(&self) -> &[WorkerProviderSpec] {
+        &self.providers
     }
 
     /// Executes one advertised tool in the worker process.
@@ -208,19 +223,83 @@ impl IsolatedWorker {
         if !self.tools.iter().any(|advertised| advertised.name == tool) {
             return Err(WorkerError::Unauthorized(tool.to_owned()));
         }
+        self.call_frame_cancellable(
+            WorkerFrame::ToolCall {
+                id: 0,
+                tool: tool.to_owned(),
+                arguments,
+            },
+            cancellation,
+        )
+    }
+
+    /// Executes one provider request advertised by the worker.
+    ///
+    /// # Parameters
+    /// - `request`: Provider request authorized by the host.
+    /// - `cancellation`: Optional host cancellation token.
+    ///
+    /// # Returns
+    /// The worker-produced assistant response.
+    ///
+    /// # Errors
+    /// Returns an authorization, protocol, timeout, cancellation, or provider
+    /// error.
+    pub fn call_provider_cancellable(
+        &self,
+        request: WorkerProviderRequest,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<WorkerProviderResponse, WorkerError> {
+        let advertised = self.providers.iter().any(|provider| {
+            provider.id == request.provider
+                && provider
+                    .models
+                    .iter()
+                    .any(|model| model.id == request.model)
+        });
+        if !advertised {
+            return Err(WorkerError::Unauthorized(format!(
+                "{}/{}",
+                request.provider, request.model
+            )));
+        }
+        let value = self
+            .call_frame_cancellable(WorkerFrame::ProviderCall { id: 0, request }, cancellation)?;
+        serde_json::from_value(value).map_err(|_| {
+            WorkerError::Protocol("plugin worker returned an invalid provider response".to_owned())
+        })
+    }
+
+    /// Sends one correlated request and waits for its worker response.
+    ///
+    /// # Parameters
+    /// - `frame`: Tool or provider request with a placeholder correlation id.
+    /// - `cancellation`: Optional host cancellation token.
+    ///
+    /// # Returns
+    /// The JSON worker result.
+    ///
+    /// # Errors
+    /// Returns a timeout, cancellation, worker, or protocol failure.
+    fn call_frame_cancellable(
+        &self,
+        mut frame: WorkerFrame,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Value, WorkerError> {
         if let Some(error) = self.closed.lock().ok().and_then(|closed| closed.clone()) {
             return Err(WorkerError::Closed(error));
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        match &mut frame {
+            WorkerFrame::ToolCall { id: request_id, .. }
+            | WorkerFrame::ProviderCall { id: request_id, .. } => *request_id = id,
+            _ => return Err(WorkerError::Protocol("invalid worker request".to_owned())),
+        }
         let (sender, receiver) = mpsc::channel();
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(id, sender);
         }
-        if let Err(error) = self.send(&WorkerFrame::ToolCall {
-            id,
-            tool: tool.to_owned(),
-            arguments,
-        }) {
+        if let Err(error) = self.send(&frame) {
             self.forget(id);
             return Err(error);
         }
@@ -229,7 +308,7 @@ impl IsolatedWorker {
             .unwrap_or_else(Instant::now);
         let mut cancelled = false;
         loop {
-            if cancellation.is_some_and(|token| token.is_cancelled()) && !cancelled {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) && !cancelled {
                 cancelled = true;
                 let _ = self.send(&WorkerFrame::Cancel { id });
             }
@@ -243,8 +322,7 @@ impl IsolatedWorker {
                 self.terminate("plugin worker request timed out; process terminated");
                 return Err(WorkerError::RequestTimeout);
             }
-            let wait = remaining.min(Duration::from_millis(25));
-            match receiver.recv_timeout(wait) {
+            match receiver.recv_timeout(remaining.min(Duration::from_millis(25))) {
                 Ok(Ok(result)) => return Ok(result),
                 Ok(Err(error)) => return Err(WorkerError::Tool(error)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -334,6 +412,40 @@ impl IsolatedWorker {
             }
         }
     }
+}
+
+/// Removes worker-controlled credentials and rejects ambiguous model identities.
+///
+/// # Parameters
+/// - `providers`: Provider registrations received in the worker hello frame.
+///
+/// # Returns
+/// `Ok(())` after sanitizing every model row.
+///
+/// # Errors
+/// Returns a protocol error for empty or duplicate provider/model identities.
+fn sanitize_provider_registrations(
+    providers: &mut [WorkerProviderSpec],
+) -> Result<(), WorkerError> {
+    let mut provider_ids = std::collections::BTreeSet::new();
+    for provider in providers {
+        if provider.id.trim().is_empty() || !provider_ids.insert(provider.id.clone()) {
+            return Err(WorkerError::Protocol(
+                "plugin worker advertised an invalid provider identity".to_owned(),
+            ));
+        }
+        let mut model_ids = std::collections::BTreeSet::new();
+        for model in &mut provider.models {
+            if model.id.trim().is_empty() || !model_ids.insert(model.id.clone()) {
+                return Err(WorkerError::Protocol(
+                    "plugin worker advertised an invalid provider model identity".to_owned(),
+                ));
+            }
+            model.provider.clone_from(&provider.id);
+            model.headers = None;
+        }
+    }
+    Ok(())
 }
 
 impl Drop for IsolatedWorker {

@@ -14,7 +14,10 @@ use crate::registry::ExtensionTool;
 use crate::tool::PluginToolAdapter;
 use crate::{NullDiagnostics, PluginDiagnostics};
 
-use super::protocol::WorkerToolSpec;
+use super::protocol::{
+    WorkerProviderOptions, WorkerProviderOutcome, WorkerProviderRequest, WorkerProviderResponse,
+    WorkerProviderSpec, WorkerToolSpec,
+};
 use super::worker::{serve_worker_stdio, WorkerHandler, WorkerHostClient};
 
 /// Native plugin set loaded inside a worker process.
@@ -45,6 +48,8 @@ struct LoadedPlugins {
     keepalive: Arc<PluginKeepalive>,
     /// Registered tools whose callbacks live inside the worker's libraries.
     tools: Vec<ExtensionTool>,
+    /// Provider implementations whose callbacks remain inside the worker.
+    providers: Vec<Arc<dyn rpi_ai::Provider>>,
     /// Loaded plugin paths for diagnostics.
     loaded_paths: Vec<PathBuf>,
     /// Runtime serving plugin runtime-action dispatch.
@@ -109,6 +114,35 @@ impl WorkerHandler for PluginWorker {
             .unwrap_or_default()
     }
 
+    /// Projects provider manifests into a credential-free worker catalog.
+    fn providers(&self) -> Vec<WorkerProviderSpec> {
+        let Ok(loaded) = self.loaded.lock() else {
+            return Vec::new();
+        };
+        loaded
+            .as_ref()
+            .map(|loaded| {
+                loaded
+                    .providers
+                    .iter()
+                    .map(|provider| WorkerProviderSpec {
+                        id: provider.id().to_owned(),
+                        models: provider
+                            .models()
+                            .iter()
+                            .cloned()
+                            .map(|mut model| {
+                                model.provider = provider.id().to_owned();
+                                model.headers = None;
+                                model
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Loads plugins with a bridge that relays runtime actions to the host.
     ///
     /// # Parameters
@@ -140,8 +174,9 @@ impl WorkerHandler for PluginWorker {
             .snapshot()
             .map(|snapshot| snapshot.tools().to_vec())
             .unwrap_or_default();
-        if tools.is_empty() {
-            return Err("no plugin tool registered in the worker".to_owned());
+        let providers = crate::PluggableProvider::from_session(&session, runtime.handle().clone());
+        if tools.is_empty() && providers.is_empty() {
+            return Err("no plugin tool or provider registered in the worker".to_owned());
         }
         let loaded_paths = session.loaded_paths().to_vec();
         drop(session);
@@ -152,6 +187,7 @@ impl WorkerHandler for PluginWorker {
         *loaded = Some(LoadedPlugins {
             keepalive,
             tools,
+            providers,
             loaded_paths,
             runtime,
             _bridge: bridge,
@@ -199,6 +235,155 @@ impl WorkerHandler for PluginWorker {
             .map(|result| result_to_json(&result))
             .map_err(|error| error.to_string())
     }
+
+    /// Executes one extension provider request inside the isolated process.
+    ///
+    /// # Parameters
+    /// - `request`: Host-authorized request bound to an advertised model.
+    /// - `cancellation`: Host cancellation token.
+    ///
+    /// # Returns
+    /// The provider's terminal assistant response.
+    ///
+    /// # Errors
+    /// Returns a safe error when the provider is unknown, the request is
+    /// cancelled, or the provider fails.
+    fn call_provider(
+        &self,
+        request: WorkerProviderRequest,
+        cancellation: CancellationToken,
+    ) -> Result<WorkerProviderResponse, String> {
+        if cancellation.is_cancelled() {
+            return Err("plugin provider request cancelled".to_owned());
+        }
+        let loaded = self
+            .loaded
+            .lock()
+            .map_err(|_| "worker plugin state is poisoned".to_owned())?;
+        let loaded = loaded
+            .as_ref()
+            .ok_or_else(|| "worker plugins are not loaded".to_owned())?;
+        let provider = loaded
+            .providers
+            .iter()
+            .find(|provider| provider.id() == request.provider)
+            .ok_or_else(|| "plugin provider is not registered".to_owned())?;
+        let model = provider
+            .models()
+            .iter()
+            .find(|model| model.id == request.model)
+            .ok_or_else(|| "plugin provider model is not registered".to_owned())?;
+        let mut options = provider_options(request.options);
+        options.signal = cancellation.clone();
+        let result = if let Some(secret) = request.secret {
+            let secret = rpi_ai::RequestSecret::new(Arc::new(WorkerSecret(secret)));
+            loaded.runtime.block_on(async {
+                drain_provider_stream(
+                    provider
+                        .stream_simple_with_request_secret(
+                            model,
+                            &request.context,
+                            &options,
+                            &secret,
+                            request.bearer,
+                        )
+                        .await,
+                    cancellation,
+                )
+                .await
+            })
+        } else {
+            if request.bearer {
+                return Err("bearer authorization requires a host credential".to_owned());
+            }
+            loaded.runtime.block_on(async {
+                drain_provider_stream(
+                    provider
+                        .stream_simple(model, &request.context, &options)
+                        .await,
+                    cancellation,
+                )
+                .await
+            })
+        };
+        result
+    }
+}
+
+/// Owns a request credential only for its worker-local provider callback.
+struct WorkerSecret(String);
+
+impl rpi_ai::SecretMaterial for WorkerSecret {
+    /// Lends the secret to one synchronous request builder.
+    fn with_secret(&self, consumer: &mut dyn FnMut(&str)) {
+        consumer(&self.0);
+    }
+}
+
+/// Converts public IPC options into upstream provider options.
+///
+/// # Parameters
+/// - `options`: Non-secret request settings received over the private worker pipe.
+///
+/// # Returns
+/// Provider options without an API key, headers, or ambient metadata.
+fn provider_options(options: WorkerProviderOptions) -> rpi_ai::SimpleStreamOptions {
+    rpi_ai::SimpleStreamOptions {
+        timeout: options.timeout_ms.map(std::time::Duration::from_millis),
+        max_retries: options.max_retries,
+        reasoning: options.reasoning,
+        max_tokens: options.max_tokens,
+        temperature: options.temperature,
+        ..rpi_ai::SimpleStreamOptions::default()
+    }
+}
+
+/// Drains the worker-local one-shot extension provider stream.
+///
+/// # Parameters
+/// - `stream`: Provider stream to drain.
+/// - `cancellation`: Host cancellation token forwarded to the provider.
+///
+/// # Returns
+/// Its terminal assistant response.
+///
+/// # Errors
+/// Returns an error when the stream ends without a terminal event or is cancelled.
+async fn drain_provider_stream(
+    mut stream: rpi_ai::AssistantMessageEventStream,
+    cancellation: CancellationToken,
+) -> Result<WorkerProviderResponse, String> {
+    while let Some(event) = tokio::select! {
+        () = cancellation.cancelled() => return Err("plugin provider request cancelled".to_owned()),
+        event = stream.next() => event,
+    } {
+        match event {
+            rpi_ai::AssistantMessageEvent::Done { reason, message } => {
+                let outcome = match reason {
+                    rpi_ai::types::DoneReason::Stop => WorkerProviderOutcome::Stop,
+                    rpi_ai::types::DoneReason::Length => WorkerProviderOutcome::Length,
+                    rpi_ai::types::DoneReason::ToolUse => WorkerProviderOutcome::ToolUse,
+                    rpi_ai::types::DoneReason::Deferred => WorkerProviderOutcome::Deferred,
+                };
+                return Ok(WorkerProviderResponse { message, outcome });
+            }
+            rpi_ai::AssistantMessageEvent::Error { reason, error } => {
+                let outcome = match reason {
+                    rpi_ai::types::ErrorReason::Aborted => WorkerProviderOutcome::Aborted,
+                    rpi_ai::types::ErrorReason::Authentication => {
+                        WorkerProviderOutcome::Authentication
+                    }
+                    rpi_ai::types::ErrorReason::Error => WorkerProviderOutcome::Error,
+                };
+                return Ok(WorkerProviderResponse {
+                    message: error,
+                    outcome,
+                });
+            }
+            _ => {}
+        }
+    }
+    Err("plugin provider stream ended without a result".to_owned())
 }
 
 /// Relays plugin runtime actions to the host over the worker protocol.

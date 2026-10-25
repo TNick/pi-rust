@@ -6,7 +6,7 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use serde_json::Value;
 
-use super::super::protocol::{WorkerFrame, WorkerToolSpec};
+use super::super::protocol::{WorkerFrame, WorkerRegistrations};
 use super::{Pending, WorkerError, WorkerHostHandler};
 
 /// Reads frames until the worker exits, routing responses and host calls.
@@ -23,7 +23,7 @@ pub(super) fn read_worker(
     input: Arc<Mutex<ChildStdin>>,
     pending: Pending,
     closed: Arc<Mutex<Option<String>>>,
-    hello: mpsc::Sender<Result<Vec<WorkerToolSpec>, WorkerError>>,
+    hello: mpsc::Sender<Result<WorkerRegistrations, WorkerError>>,
     host_handler: Option<Arc<dyn WorkerHostHandler>>,
 ) {
     let mut hello = Some(hello);
@@ -40,7 +40,9 @@ pub(super) fn read_worker(
         };
         if matches!(&frame, WorkerFrame::Hello { .. }) {
             if let Some(sender) = hello.take() {
-                let result = frame.validate_hello().map_err(WorkerError::Protocol);
+                let result = frame
+                    .validate_hello_registrations()
+                    .map_err(WorkerError::Protocol);
                 let _ = sender.send(result);
             }
             continue;
@@ -50,6 +52,17 @@ pub(super) fn read_worker(
                 resolve(&pending, id, Ok(result));
             }
             WorkerFrame::ToolError { id, error } => {
+                resolve(&pending, id, Err(error));
+            }
+            WorkerFrame::ProviderResult { id, response } => match serde_json::to_value(response) {
+                Ok(message) => resolve(&pending, id, Ok(message)),
+                Err(_) => resolve(
+                    &pending,
+                    id,
+                    Err("plugin worker returned an invalid provider response".to_owned()),
+                ),
+            },
+            WorkerFrame::ProviderError { id, error } => {
                 resolve(&pending, id, Err(error));
             }
             WorkerFrame::HostCall {

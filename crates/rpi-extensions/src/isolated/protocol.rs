@@ -1,10 +1,11 @@
 //! Defines the versioned JSON-lines protocol for isolated plugin workers.
 
+use rpi_ai::{AssistantMessage, Context, Model, ThinkingLevel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Version of the host/worker framing contract.
-pub const WORKER_PROTOCOL: &str = "rpi-plugin-worker-v1";
+pub const WORKER_PROTOCOL: &str = "rpi-plugin-worker-v2";
 
 /// One plugin tool advertised by a worker process.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -18,6 +19,105 @@ pub struct WorkerToolSpec {
     pub parameters: Value,
 }
 
+/// One provider and its host-safe model catalog advertised by a worker.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerProviderSpec {
+    /// Host-selected provider identity.
+    pub id: String,
+    /// Credential-free models served by the provider.
+    pub models: Vec<Model>,
+}
+
+/// Registrations returned by a worker during startup.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerRegistrations {
+    /// Worker tools available for host authorization.
+    pub tools: Vec<WorkerToolSpec>,
+    /// Provider models available for host catalog publication.
+    pub providers: Vec<WorkerProviderSpec>,
+}
+
+/// Non-secret request settings accepted by an isolated provider call.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkerProviderOptions {
+    /// Request timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
+    /// Maximum number of retry attempts.
+    pub max_retries: Option<u32>,
+    /// Reasoning level requested by the host.
+    pub reasoning: Option<ThinkingLevel>,
+    /// Requested output token limit.
+    pub max_tokens: Option<u64>,
+    /// Requested sampling temperature.
+    pub temperature: Option<f64>,
+}
+
+/// One request sent to a provider registered by a worker plugin.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkerProviderRequest {
+    /// Exact provider identity advertised during worker startup.
+    pub provider: String,
+    /// Exact model identity advertised for that provider.
+    pub model: String,
+    /// Provider-neutral request context.
+    pub context: Context,
+    /// Non-secret request options.
+    pub options: WorkerProviderOptions,
+    /// Request-only host credential carried over the private worker pipe.
+    pub secret: Option<String>,
+    /// Whether the request credential uses bearer authorization.
+    pub bearer: bool,
+}
+
+/// Terminal provider response crossing the isolated worker boundary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerProviderResponse {
+    /// Terminal assistant message produced by the extension provider.
+    pub message: AssistantMessage,
+    /// Terminal category preserved for host authentication and cancellation logic.
+    pub outcome: WorkerProviderOutcome,
+}
+
+/// Safe terminal category reported for a worker provider call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerProviderOutcome {
+    /// Provider returned a completed response.
+    Stop,
+    /// Provider completed at the requested output limit.
+    Length,
+    /// Provider completed with a tool call.
+    ToolUse,
+    /// Provider returned a deferred response.
+    Deferred,
+    /// Provider explicitly rejected request authentication.
+    Authentication,
+    /// Provider failed for another reason.
+    Error,
+    /// Request was cancelled.
+    Aborted,
+}
+
+impl std::fmt::Debug for WorkerProviderRequest {
+    /// Formats a provider request without revealing its credential.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerProviderRequest")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("context", &"[provider context]")
+            .field("options", &self.options)
+            .field("secret", &self.secret.as_ref().map(|_| "[redacted]"))
+            .field("bearer", &self.bearer)
+            .finish()
+    }
+}
+
 /// One host/worker frame.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -28,6 +128,9 @@ pub enum WorkerFrame {
         protocol: String,
         /// Tools the worker can execute.
         tools: Vec<WorkerToolSpec>,
+        /// Providers and models the worker can execute.
+        #[serde(default)]
+        providers: Vec<WorkerProviderSpec>,
     },
     /// Host requests one registered tool invocation.
     ToolCall {
@@ -47,6 +150,27 @@ pub enum WorkerFrame {
     },
     /// Worker reports a safe tool failure.
     ToolError {
+        /// Correlation identity.
+        id: u64,
+        /// Bounded failure text.
+        error: String,
+    },
+    /// Host requests one provider turn from the worker.
+    ProviderCall {
+        /// Correlation identity.
+        id: u64,
+        /// Provider request authorized by the host.
+        request: WorkerProviderRequest,
+    },
+    /// Worker returns a completed provider turn.
+    ProviderResult {
+        /// Correlation identity.
+        id: u64,
+        /// Terminal assistant response.
+        response: WorkerProviderResponse,
+    },
+    /// Worker reports a safe provider failure.
+    ProviderError {
         /// Correlation identity.
         id: u64,
         /// Bounded failure text.
@@ -96,6 +220,26 @@ impl WorkerFrame {
         Self::Hello {
             protocol: WORKER_PROTOCOL.to_owned(),
             tools,
+            providers: Vec::new(),
+        }
+    }
+
+    /// Builds readiness with tools and isolated provider registrations.
+    ///
+    /// # Parameters
+    /// - `tools`: Worker tools the host may authorize.
+    /// - `providers`: Credential-free provider catalog advertised by the worker.
+    ///
+    /// # Returns
+    /// A `hello` frame stamped with the current protocol version.
+    pub fn hello_with_providers(
+        tools: Vec<WorkerToolSpec>,
+        providers: Vec<WorkerProviderSpec>,
+    ) -> Self {
+        Self::Hello {
+            protocol: WORKER_PROTOCOL.to_owned(),
+            tools,
+            providers,
         }
     }
 
@@ -133,7 +277,31 @@ impl WorkerFrame {
     /// Returns a safe protocol error for another frame or version.
     pub fn validate_hello(&self) -> Result<Vec<WorkerToolSpec>, String> {
         match self {
-            Self::Hello { protocol, tools } if protocol == WORKER_PROTOCOL => Ok(tools.clone()),
+            Self::Hello {
+                protocol, tools, ..
+            } if protocol == WORKER_PROTOCOL => Ok(tools.clone()),
+            Self::Hello { .. } => Err("plugin worker protocol version mismatch".to_owned()),
+            _ => Err("plugin worker did not start with a hello frame".to_owned()),
+        }
+    }
+
+    /// Validates and returns all worker registrations from a readiness frame.
+    ///
+    /// # Returns
+    /// The worker's tool and provider registrations.
+    ///
+    /// # Errors
+    /// Returns a protocol error for a non-hello frame or incompatible version.
+    pub fn validate_hello_registrations(&self) -> Result<WorkerRegistrations, String> {
+        match self {
+            Self::Hello {
+                protocol,
+                tools,
+                providers,
+            } if protocol == WORKER_PROTOCOL => Ok(WorkerRegistrations {
+                tools: tools.clone(),
+                providers: providers.clone(),
+            }),
             Self::Hello { .. } => Err("plugin worker protocol version mismatch".to_owned()),
             _ => Err("plugin worker did not start with a hello frame".to_owned()),
         }
