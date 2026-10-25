@@ -56,76 +56,28 @@ impl Component for RegularPanels {
         self
     }
 }
-fn clean(s: &str) -> String {
-    rpi_tui::strip_ansi(s)
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect()
-}
-fn highlighted(text: &str, spec: &ExtensionPanel) -> String {
-    let colors = current_theme().colors;
-    let mut result = String::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        let next = spec
-            .highlights
-            .iter()
-            .filter(|h| !h.text.is_empty())
-            .filter_map(|h| rest.find(&h.text).map(|at| (at, h)))
-            .min_by_key(|(at, _)| *at);
-        let Some((at, highlight)) = next else {
-            result.push_str(&colors.dim.fg(rest));
-            break;
-        };
-        result.push_str(&colors.dim.fg(&rest[..at]));
-        let color = match highlight.color {
-            PanelHighlightColor::Warning => colors.warning,
-            PanelHighlightColor::Error => colors.error,
-        };
-        result.push_str(&color.fg(&highlight.text));
-        rest = &rest[at + highlight.text.len()..];
-    }
-    result
-}
 impl Component for Panel {
     fn render(&self, available_width: usize) -> Vec<String> {
         let spec = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        // Visibility is checked against terminal width by Panels, while this
-        // component receives only its allocated overlay/sidebar width.
-        let width = available_width.min(spec.width);
-        if width < 4 {
-            return vec![];
-        }
-        let colors = current_theme().colors;
-        let inner = width.saturating_sub(if spec.border { 4 } else { 0 });
-        let fit = |text: &str| {
-            let text = clean(text);
-            rpi_tui::utils::truncate_to_width(&highlighted(&text, &spec), inner, "")
+        let options = rpi_tui::TextPanelOptions {
+            width: spec.width,
+            max_height: spec.max_height,
+            border: spec.border,
+            title: spec.title.clone(),
+            lines: spec.lines.clone(),
+            highlights: spec
+                .highlights
+                .iter()
+                .map(|highlight| rpi_tui::TextPanelHighlight {
+                    text: highlight.text.clone(),
+                    color: match highlight.color {
+                        PanelHighlightColor::Warning => rpi_tui::TextPanelHighlightColor::Warning,
+                        PanelHighlightColor::Error => rpi_tui::TextPanelHighlightColor::Error,
+                    },
+                })
+                .collect(),
         };
-        let mut content = Vec::new();
-        if !spec.title.is_empty() {
-            content.push(fit(&spec.title));
-        }
-        content.extend(spec.lines.iter().map(|row| fit(row)));
-        let mut rows = Vec::new();
-        if spec.border && spec.max_height >= 2 {
-            rows.push(colors.dim.fg(&format!("┌{}┐", "─".repeat(width - 2))));
-            for row in content.into_iter().take(spec.max_height - 2) {
-                rows.push(format!(
-                    "{}{}{}",
-                    colors.dim.fg("│ "),
-                    row,
-                    colors.dim.fg(&format!(
-                        "{} │",
-                        " ".repeat(inner.saturating_sub(visible_width(&row)))
-                    ))
-                ));
-            }
-            rows.push(colors.dim.fg(&format!("└{}┘", "─".repeat(width - 2))));
-        } else {
-            rows.extend(content.into_iter().take(spec.max_height));
-        }
-        rows
+        rpi_tui::TextPanel::new(options).render(available_width)
     }
     fn invalidate(&self) {}
     fn as_any(&self) -> &dyn std::any::Any {

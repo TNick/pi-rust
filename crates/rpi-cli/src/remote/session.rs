@@ -269,7 +269,8 @@ impl RemoteSession {
             }
             RemoteEvent::TurnStart
             | RemoteEvent::TurnEnd { .. }
-            | RemoteEvent::ProviderError { .. } => {}
+            | RemoteEvent::ProviderError { .. }
+            | RemoteEvent::ProviderAuthentication { .. } => {}
             RemoteEvent::MessageStart { message } => {
                 match message_role(message) {
                     "assistant" => {

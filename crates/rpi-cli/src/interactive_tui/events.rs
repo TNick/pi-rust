@@ -212,7 +212,7 @@ pub(super) async fn handle_agent_event(
             tui.request_render(false);
         }
 
-        AgentEvent::ProviderError { .. } => {}
+        AgentEvent::ProviderError { .. } | AgentEvent::ProviderAuthentication { .. } => {}
 
         AgentEvent::TurnStart => {
             // A new turn: reset the streaming-assistant guard so the next

@@ -56,6 +56,13 @@ pub enum RemoteEvent {
     ProviderError {
         reason: String,
     },
+    ProviderAuthentication {
+        #[serde(rename = "providerId")]
+        provider_id: String,
+        #[serde(rename = "modelId")]
+        model_id: String,
+        outcome: String,
+    },
     TurnStart,
     TurnEnd {
         message: Value,
@@ -131,6 +138,7 @@ impl RemoteEvent {
             RemoteEvent::AgentEnd { .. } => "agent_end",
             RemoteEvent::RetryScheduled { .. } => "retry_scheduled",
             RemoteEvent::ProviderError { .. } => "provider_error",
+            RemoteEvent::ProviderAuthentication { .. } => "provider_authentication",
             RemoteEvent::TurnStart => "turn_start",
             RemoteEvent::TurnEnd { .. } => "turn_end",
             RemoteEvent::MessageStart { .. } => "message_start",
@@ -172,6 +180,15 @@ impl RemoteEvent {
                     rpi_ai::types::ErrorReason::Aborted => "aborted",
                     rpi_ai::types::ErrorReason::Authentication => "authentication",
                     rpi_ai::types::ErrorReason::Error => "error",
+                }
+                .to_owned(),
+            },
+            AgentEvent::ProviderAuthentication { result } => RemoteEvent::ProviderAuthentication {
+                provider_id: result.provider_id.clone(),
+                model_id: result.model_id.clone(),
+                outcome: match result.outcome {
+                    rpi_ai::ProviderAuthenticationOutcome::Accepted => "accepted",
+                    rpi_ai::ProviderAuthenticationOutcome::Rejected => "rejected",
                 }
                 .to_owned(),
             },
@@ -485,6 +502,32 @@ mod tests {
         assert_eq!(retry["attempt"], 3);
         assert_eq!(retry["maxRetries"], 10);
         assert_eq!(retry["delayMs"], 8_000);
+
+        let auth = serde_json::to_value(RemoteEvent::from_agent_event(
+            &AgentEvent::ProviderAuthentication {
+                result: rpi_ai::ProviderAuthenticationResult {
+                    provider_id: "provider-a".into(),
+                    model_id: "model-a".into(),
+                    outcome: rpi_ai::ProviderAuthenticationOutcome::Rejected,
+                },
+            },
+        ))
+        .unwrap();
+        assert_eq!(auth["type"], "provider_authentication");
+        assert_eq!(auth["providerId"], "provider-a");
+        assert_eq!(auth["modelId"], "model-a");
+        assert_eq!(auth["outcome"], "rejected");
+        assert_eq!(
+            RemoteEvent::from_agent_event(&AgentEvent::ProviderAuthentication {
+                result: rpi_ai::ProviderAuthenticationResult {
+                    provider_id: "provider-a".into(),
+                    model_id: "model-a".into(),
+                    outcome: rpi_ai::ProviderAuthenticationOutcome::Accepted,
+                },
+            })
+            .type_tag(),
+            "provider_authentication"
+        );
     }
 
     #[test]

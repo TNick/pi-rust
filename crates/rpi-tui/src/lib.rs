@@ -55,6 +55,7 @@ pub mod terminal;
 pub mod terminal_colors;
 pub mod terminal_image;
 pub mod text;
+pub mod text_panel;
 pub mod theme;
 pub mod tool_execution;
 mod tool_panel;
@@ -146,6 +147,7 @@ pub use terminal_image::{
     ImageRenderOptions, TerminalCapabilities,
 };
 pub use text::Text;
+pub use text_panel::{TextPanel, TextPanelHighlight, TextPanelHighlightColor, TextPanelOptions};
 pub use theme::{
     apply_theme_preset, global_theme_manager, theme, theme_revision, Color, Theme, ThemeColors,
     ThemeManager, ThemePreset, ThemeSpacing,
