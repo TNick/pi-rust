@@ -3,8 +3,9 @@
 //! provider's wire format directly; it calls `stream_simple` and consumes the
 //! returned [`AssistantMessageEventStream`].
 
-use crate::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
+use crate::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 use crate::model::Model;
+use crate::provider_option_attestation::ProviderOptionsAttestation;
 use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, DeferredHandle, ErrorReason, StopReason,
     ThinkingBudgets, ThinkingLevel,
@@ -250,13 +251,14 @@ pub(crate) fn report_applied_request_settings<'a, I>(
         omitted_categories.push("unclassified_headers".to_owned());
     }
     callback(AppliedRequestSettings {
-        schema_version: "rpi-applied-request-settings-v3".to_owned(),
+        schema_version: "rpi-applied-request-settings-v4".to_owned(),
         provider_id: model.provider.clone(),
         model_id: model.id.clone(),
         api_id: model.api.as_str().to_owned(),
         applied_values,
         request_body_sha256,
         request_header_sha256,
+        provider_options: ProviderOptionsAttestation::default(),
         omitted_categories,
         complete: false,
     });
@@ -275,6 +277,7 @@ pub const DEFAULT_LLM_API_TIMEOUT: Duration = Duration::from_secs(600);
 /// - `applied_values`: Allowlisted scalar settings found in the final body.
 /// - `request_body_sha256`: Digest of the exact prepared JSON body.
 /// - `request_header_sha256`: Digest of allowlisted prepared header values.
+/// - `provider_options`: Opaque per-option application status and value digests.
 /// - `omitted_categories`: Sensitive or opaque request categories omitted.
 /// - `complete`: Whether every request-affecting setting is represented.
 ///
@@ -299,6 +302,9 @@ pub struct AppliedRequestSettings {
     /// SHA-256 identity of exact allowlisted, non-sensitive header values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_header_sha256: Option<String>,
+    /// Opaque applied/transformed/ignored status for schema-safe provider options.
+    #[serde(default)]
+    pub provider_options: ProviderOptionsAttestation,
     /// Omitted request categories that may contain secrets or opaque data.
     pub omitted_categories: Vec<String>,
     /// Whether the report attests every request-affecting value.
@@ -493,8 +499,8 @@ impl SimpleStreamOptions {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppliedRequestSettings, AppliedRequestSettingsCallback, DEFAULT_LLM_API_TIMEOUT, Provider,
-        ProviderContinuation, SimpleStreamOptions, report_applied_request_settings,
+        report_applied_request_settings, AppliedRequestSettings, AppliedRequestSettingsCallback,
+        Provider, ProviderContinuation, SimpleStreamOptions, DEFAULT_LLM_API_TIMEOUT,
     };
     use crate::model::Model;
     use crate::types::Api;
@@ -541,7 +547,7 @@ mod tests {
         );
 
         let reports = reports.lock().unwrap();
-        assert_eq!(reports[0].schema_version, "rpi-applied-request-settings-v3");
+        assert_eq!(reports[0].schema_version, "rpi-applied-request-settings-v4");
         let first_digest = reports[0]
             .request_body_sha256
             .as_deref()
@@ -596,11 +602,9 @@ mod tests {
         let encoded = serde_json::to_string(report).expect("report JSON");
         assert!(!encoded.contains("private-header-sentinel"));
         assert!(!encoded.contains("private-custom-sentinel"));
-        assert!(
-            report
-                .omitted_categories
-                .contains(&"unclassified_headers".to_owned())
-        );
+        assert!(report
+            .omitted_categories
+            .contains(&"unclassified_headers".to_owned()));
         assert!(!report.complete);
     }
 

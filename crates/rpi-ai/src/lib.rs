@@ -23,6 +23,9 @@ pub mod images;
 pub mod json_parse;
 pub mod model;
 pub mod provider;
+pub mod provider_option_attestation;
+#[cfg(test)]
+mod provider_option_attestation_tests;
 pub mod providers;
 pub mod schema;
 pub(crate) mod strict_schema;
@@ -37,6 +40,10 @@ pub use provider::{
     CacheRetention, ContextPatch, NoopProviderHooks, Provider, ProviderContinuation, ProviderHooks,
     RequestSecret, SecretMaterial, SimpleStreamOptions, SimpleStreamOptionsPatch,
     DEFAULT_LLM_API_TIMEOUT,
+};
+pub use provider_option_attestation::{
+    attest_provider_options, validate_provider_option_attestation, ProviderOptionAttestation,
+    ProviderOptionDisposition, ProviderOptionsAttestation,
 };
 pub use schema::{validate_json_value, validate_tool_arguments};
 pub use types::{

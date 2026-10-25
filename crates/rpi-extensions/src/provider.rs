@@ -52,9 +52,9 @@ use rpi_plugin_sdk::callbacks::OwnedString;
 use rpi_plugin_sdk::{StbString, StbStringRef};
 use tokio::runtime::Handle;
 
-use crate::PluginKeepalive;
 use crate::loader::ExtensionSession;
 use crate::registry::{RegisteredProvider, RegistrySnapshot};
+use crate::PluginKeepalive;
 
 #[cfg(test)]
 mod lifetime_tests;
@@ -393,6 +393,7 @@ fn incomplete_applied_settings_report(model: &Model) -> AppliedRequestSettings {
         applied_values: Default::default(),
         request_body_sha256: None,
         request_header_sha256: None,
+        provider_options: rpi_ai::ProviderOptionsAttestation::default(),
         omitted_categories: vec![
             "extension_managed_request_transforms".to_owned(),
             "provider_applied_values_unavailable".to_owned(),
@@ -1171,6 +1172,7 @@ fn normalize_extension_report(
         "appliedValues",
         "requestBodySha256",
         "requestHeaderSha256",
+        "providerOptions",
         "omittedCategories",
         "complete",
     ];
@@ -1181,10 +1183,13 @@ fn normalize_extension_report(
             "rpi-applied-request-settings-v1"
                 | "rpi-applied-request-settings-v2"
                 | "rpi-applied-request-settings-v3"
+                | "rpi-applied-request-settings-v4"
         )
         || (schema == "rpi-applied-request-settings-v1" && object.contains_key("requestBodySha256"))
         || (schema != "rpi-applied-request-settings-v3"
+            && schema != "rpi-applied-request-settings-v4"
             && object.contains_key("requestHeaderSha256"))
+        || (schema != "rpi-applied-request-settings-v4" && object.contains_key("providerOptions"))
     {
         return None;
     }
@@ -1204,6 +1209,8 @@ fn normalize_extension_report(
         || report.api_id != model.api.as_str()
         || (schema == "rpi-applied-request-settings-v2" && report.request_body_sha256.is_none())
         || (schema == "rpi-applied-request-settings-v3"
+            && (report.request_body_sha256.is_none() || report.request_header_sha256.is_none()))
+        || (schema == "rpi-applied-request-settings-v4"
             && (report.request_body_sha256.is_none() || report.request_header_sha256.is_none()))
     {
         return None;
@@ -1262,16 +1269,25 @@ fn normalize_extension_report(
         }
     }
     report.applied_values = safe_values;
+    if schema == "rpi-applied-request-settings-v4" {
+        if !rpi_ai::validate_provider_option_attestation(model, &report.provider_options) {
+            return None;
+        }
+    }
     report.omitted_categories = vec![
         "extension_managed_request_transforms".to_owned(),
         "provider_applied_values_unavailable".to_owned(),
-        "provider_options_values".to_owned(),
         "endpoint".to_owned(),
         "headers_and_credentials".to_owned(),
         "prompt_and_transcript".to_owned(),
         "tools_and_schemas".to_owned(),
         "unrecognized_request_fields".to_owned(),
     ];
+    if schema != "rpi-applied-request-settings-v4" || report.provider_options.omitted_count > 0 {
+        report
+            .omitted_categories
+            .push("opaque_provider_options".to_owned());
+    }
     report.complete = false;
     Some(report)
 }
@@ -2198,6 +2214,56 @@ mod tests {
         assert!(normalize_extension_report(&malformed, &model).is_none());
     }
 
+    /// Accepts complete safe option evidence and rejects unknown option IDs.
+    #[test]
+    fn extension_applied_settings_v4_validates_option_attestations() {
+        let mut model = Model::new(
+            "model-a",
+            "Model A",
+            rpi_ai::types::Api::OpenaiCompletions,
+            "provider-a",
+            "https://example.test",
+        );
+        model.provider_options_schema = Some(rpi_ai::ProviderOptionsSchema {
+            version: 1,
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["fast", "careful"]}
+                },
+                "additionalProperties": false
+            }),
+        });
+        model
+            .provider_options
+            .insert("mode".to_owned(), serde_json::json!("fast"));
+        let effective =
+            std::collections::BTreeMap::from([("mode".to_owned(), serde_json::json!("careful"))]);
+        let options = rpi_ai::attest_provider_options(&model, &effective);
+        let mut report = serde_json::json!({
+            "schemaVersion": "rpi-applied-request-settings-v4",
+            "providerId": "provider-a",
+            "modelId": "model-a",
+            "apiId": "openai-completions",
+            "appliedValues": {},
+            "requestBodySha256": "a".repeat(64),
+            "requestHeaderSha256": "b".repeat(64),
+            "omittedCategories": [],
+            "complete": false
+        });
+        report["providerOptions"] = serde_json::to_value(options).expect("options JSON");
+
+        let normalized = normalize_extension_report(&report, &model)
+            .expect("valid version-four option attestation");
+        assert!(!normalized
+            .omitted_categories
+            .contains(&"opaque_provider_options".to_owned()));
+
+        report["providerOptions"]["options"][0]["optionIdSha256"] =
+            serde_json::json!("c".repeat(64));
+        assert!(normalize_extension_report(&report, &model).is_none());
+    }
+
     /// Provider model options reach extension providers through the versioned
     /// request envelope while staying out of public model serialization.
     #[test]
@@ -2289,14 +2355,12 @@ mod tests {
                 "additionalProperties": false
             }),
         });
-        assert!(
-            request_envelope_json(
-                &model,
-                &Context::new(vec![]),
-                &SimpleStreamOptions::default(),
-            )
-            .is_err()
-        );
+        assert!(request_envelope_json(
+            &model,
+            &Context::new(vec![]),
+            &SimpleStreamOptions::default(),
+        )
+        .is_err());
     }
 
     /// A callback state used to verify manifest-gated provider requests.
