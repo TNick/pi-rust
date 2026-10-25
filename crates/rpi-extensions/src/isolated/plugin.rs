@@ -511,6 +511,25 @@ impl RuntimeActionHost for WorkerActionHost {
         self.relay("child_agent", json!({"owner": owner, "arguments": args}))
     }
 
+    /// Relays one explicitly allowlisted host capability.
+    ///
+    /// # Parameters
+    /// - `args`: Stable capability name and arguments supplied by the plugin.
+    ///
+    /// # Returns
+    /// The capability result from the host.
+    ///
+    /// # Errors
+    /// Returns a safe denial when the name or capability is unavailable.
+    async fn call_host_capability(&self, args: Value) -> Result<Value, String> {
+        let capability = args
+            .get("capability")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "host capability name is missing".to_owned())?;
+        let arguments = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        self.relay(capability, arguments)
+    }
+
     /// Relays `get_session_branch` to the host.
     async fn get_session_branch(&self, args: Value) -> Result<Value, String> {
         self.relay("get_session_branch", args)

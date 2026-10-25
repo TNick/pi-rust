@@ -405,6 +405,22 @@ pub trait RuntimeActionHost: Send + Sync {
     ) -> Result<serde_json::Value, String> {
         Err("SideQuestion is not supported by this host; upgrade rpi".into())
     }
+    /// Calls one host capability after the plugin worker enforces its allowlist.
+    ///
+    /// # Parameters
+    /// - `_args`: Capability name and its JSON arguments.
+    ///
+    /// # Returns
+    /// The selected host capability result.
+    ///
+    /// # Errors
+    /// Returns a denial when the host does not implement capability calls.
+    async fn call_host_capability(
+        &self,
+        _args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Err("host capability calls are not supported by this host".into())
+    }
 
     /// Refresh the host-side model selector after provider packages reload.
     fn replace_model_catalog(&self, _models: Vec<rpi_ai::Model>) {}
@@ -916,6 +932,9 @@ async fn dispatch(
         RuntimeActionId::GetExecutionContext => host.get_execution_context(args).await,
         RuntimeActionId::ChildAgent => Err("ChildAgent requires a plugin bridge".into()),
         RuntimeActionId::SideQuestion => Err("SideQuestion requires a plugin bridge".into()),
+        RuntimeActionId::HostCapability => {
+            Err("HostCapability requires a live plugin tool invocation".into())
+        }
         RuntimeActionId::StdioLifecycle => {
             Err("stdio lifecycle requires a plugin context".to_owned())
         }
@@ -955,7 +974,7 @@ pub extern "C" fn trampoline_runtime_action(
         run_action(
             action_id,
             // Highest id this ABI defines — bump when adding an action.
-            u32::from(RuntimeActionId::SideQuestion),
+            u32::from(RuntimeActionId::HostCapability),
             args_json,
             out,
             user_data,
@@ -1121,6 +1140,26 @@ fn run_action(
             });
             bridge.runtime.spawn(async move {
                 let _ = tx.send(host.side_question(owner, args, sink).await);
+            });
+        }
+    } else if action == RuntimeActionId::HostCapability {
+        let authorized = bridge
+            .invocation
+            .as_ref()
+            .is_some_and(|(child, key, signal)| {
+                !child
+                    && !signal.is_cancelled()
+                    && (invocation_thread
+                        || runtime_key.as_ref().and_then(serde_json::Value::as_str)
+                            == Some(key.as_str()))
+            });
+        if !authorized {
+            let _ = tx.send(Err(
+                "HostCapability requires a live parent tool invocation".into()
+            ));
+        } else {
+            bridge.runtime.spawn(async move {
+                let _ = tx.send(host.call_host_capability(args).await);
             });
         }
     } else if action == RuntimeActionId::ChildAgent {
@@ -1958,10 +1997,10 @@ mod tests {
         );
 
         // A genuinely unknown id is still rejected (no silent acceptance).
-        // 26 is one past the highest defined action.
+        // 27 is one past the highest defined action.
         let mut out = StbString::empty();
         assert_eq!(
-            trampoline_runtime_action(26, StbStringRef::from_str("{}"), &mut out, user_data),
+            trampoline_runtime_action(27, StbStringRef::from_str("{}"), &mut out, user_data),
             2
         );
         // SAFETY: this action returned a live host allocation, not previously freed.
