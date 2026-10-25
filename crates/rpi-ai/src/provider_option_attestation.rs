@@ -49,7 +49,7 @@ pub struct ProviderOptionAttestation {
     pub option_id_sha256: String,
     /// Whether the configured value was applied, transformed, ignored, or unverifiable.
     pub disposition: ProviderOptionDisposition,
-    /// Digest of the effective scalar value, absent for ignored options.
+    /// Digest of the effective scalar value, absent for ignored or unverifiable options.
     pub effective_value_sha256: Option<String>,
 }
 
