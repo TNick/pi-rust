@@ -51,6 +51,7 @@ pub enum GenerationError {
 ///
 /// Public members:
 /// - [`GenerationCandidate::new`]: stage a loaded session.
+/// - [`GenerationCandidate::from_generation`]: stage the current session and its retained resources.
 /// - [`GenerationCandidate::retain`]: pin an extra host-owned resource to this
 ///   generation's lifetime.
 /// - [`GenerationCandidate::session`]: inspect the staged session.
@@ -75,6 +76,25 @@ impl GenerationCandidate {
         Self {
             session,
             retained: Vec::new(),
+        }
+    }
+
+    /// Stage the current session and retain its generation-owned resources.
+    ///
+    /// This is useful when a host must publish new catalog metadata while
+    /// keeping the loaded extension session unchanged. The current generation
+    /// remains live until publication; if staging is abandoned, the candidate
+    /// releases its cloned resource references without affecting the live one.
+    ///
+    /// # Parameters
+    /// - `generation`: Current published generation to carry forward.
+    ///
+    /// # Returns
+    /// An unpublished candidate containing the same session and retained resources.
+    pub fn from_generation(generation: &SessionGeneration) -> Self {
+        Self {
+            session: generation.session.clone(),
+            retained: generation.retained.clone(),
         }
     }
 

@@ -129,6 +129,48 @@ fn an_in_flight_call_keeps_the_superseded_generation_resources_alive() {
 }
 
 #[test]
+fn a_republished_session_keeps_its_resources_until_the_new_generation_retires() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let slot = ExtensionGenerationSlot::empty();
+    let initial = slot
+        .publish(
+            GenerationCandidate::new(session_with_tool("retained", "/plugins/retained.so")).retain(
+                Arc::new(Pinned {
+                    dropped: Arc::clone(&dropped),
+                }),
+            ),
+        )
+        .expect("publish initial generation");
+    drop(initial.previous);
+    let first = slot.current();
+    drop(initial.current);
+
+    let refreshed = slot
+        .publish(GenerationCandidate::from_generation(&first))
+        .expect("republish current session");
+    assert_eq!(refreshed.current.identity().tools, vec!["retained"]);
+    assert_ne!(refreshed.current.id(), first.id());
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "the new generation must retain the current generation's resources"
+    );
+
+    drop(first);
+    drop(refreshed.previous);
+    let retired = slot
+        .publish(GenerationCandidate::new(crate::ExtensionSession::none()))
+        .expect("replace retained session");
+    drop(retired.previous);
+    drop(retired.current);
+    drop(refreshed.current);
+    drop(slot);
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "retained resources are released after the replacement generation retires"
+    );
+}
+
+#[test]
 fn resolving_a_superseded_generation_id_fails_closed() {
     let slot = ExtensionGenerationSlot::new(session_with_tool("first", "/plugins/first.so"));
     let first_id = slot.current_id();
