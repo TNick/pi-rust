@@ -103,6 +103,10 @@ pub use registry::{
     DEFAULT_PRIORITY,
 };
 pub use resources::{emit_resources_discover, DiscoveredResources};
+pub use session_generation::{
+    ExtensionGenerationSlot, GenerationCandidate, GenerationError, GenerationId,
+    GenerationIdentity, InFlightGuard, PublishedGeneration, SessionGeneration,
+};
 pub use status::ExtensionStatusMailbox;
 mod panel;
 pub use panel::{ExtensionPanel, PanelAnchor, PanelHighlight, PanelHighlightColor, PanelLayout};
@@ -126,6 +130,7 @@ mod provider_hooks;
 mod provider_reload;
 mod registry;
 mod resources;
+mod session_generation;
 mod status;
 mod stdio;
 mod tool;
