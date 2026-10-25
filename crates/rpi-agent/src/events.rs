@@ -10,6 +10,7 @@
 //! `Deserialize` on `AssistantMessageEvent` (which is stream-protocol-only).
 
 use rpi_ai::types::{AssistantMessage, AssistantMessageEvent, ErrorReason, ToolResultMessage};
+use rpi_ai::ProviderAuthenticationResult;
 use std::sync::Arc;
 
 use crate::message::AgentMessage;
@@ -40,6 +41,11 @@ pub enum AgentEvent {
     ProviderError {
         /// Typed provider failure category without response-body data.
         reason: ErrorReason,
+    },
+    /// Emitted when a provider response proves the request was accepted or rejected.
+    ProviderAuthentication {
+        /// Safe provider evidence for the exact model request.
+        result: ProviderAuthenticationResult,
     },
     /// Emitted at the start of each turn (a turn = one assistant response + its
     /// tool calls/results).
@@ -99,6 +105,7 @@ impl AgentEvent {
             AgentEvent::AgentEnd { .. } => "agent_end",
             AgentEvent::RetryScheduled { .. } => "retry_scheduled",
             AgentEvent::ProviderError { .. } => "provider_error",
+            AgentEvent::ProviderAuthentication { .. } => "provider_authentication",
             AgentEvent::TurnStart => "turn_start",
             AgentEvent::TurnEnd { .. } => "turn_end",
             AgentEvent::MessageStart { .. } => "message_start",

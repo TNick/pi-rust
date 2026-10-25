@@ -8,11 +8,13 @@ mod catalog;
 mod config_value;
 mod credential_store;
 mod credentials;
+mod extension_catalog;
 mod fingerprint;
 mod live_catalog;
 mod models;
 mod properties;
 mod provider_factory;
+mod provider_lifecycle;
 mod provider_rows;
 mod refresh;
 mod safe_snapshot;
@@ -33,6 +35,10 @@ pub use credentials::{
     CredentialResolutionError, CredentialSource, HostCredentialMaterial, ProtectedCredential,
     ProtectedCredentialResolver, ResolvedCredential,
 };
+pub use extension_catalog::{
+    publish_extension_catalog_generation, snapshot_extension_catalog_generation,
+    ExtensionCatalogSnapshot,
+};
 pub use fingerprint::{
     model_configuration_fingerprint, model_execution_fingerprint, ModelConfigurationFingerprint,
     ModelExecutionExclusion, ModelExecutionFingerprint,
@@ -50,6 +56,10 @@ pub use properties::{
 pub use provider_factory::{
     create_builtin_provider, create_builtin_provider_for_api, supports_builtin_provider_api,
     BuiltinProviderError,
+};
+pub use provider_lifecycle::{
+    ProviderAuthenticationObservation, ProviderAuthenticationOutcome, ProviderCredentialChange,
+    ProviderLifecycleEvent, ProviderLifecycleEvents,
 };
 pub use provider_rows::ProviderModelRows;
 pub use provider_rows::{ModelsConfigFile, ModelsConfigFileError};

@@ -462,8 +462,11 @@ mod tests {
 
     #[test]
     fn provider_continuation_is_scoped_and_redacts_opaque_state() {
-        let continuation =
-            ProviderContinuation::new("provider-a", "model-a", "private-continuation-reference");
+        let continuation = ProviderContinuation::new(
+            "provider-a",
+            "model-a",
+            "private-continuation-reference".to_owned(),
+        );
         let clone = continuation.clone();
 
         assert!(continuation.is_scoped_to("provider-a", "model-a"));

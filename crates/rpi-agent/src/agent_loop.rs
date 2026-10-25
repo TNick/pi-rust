@@ -35,6 +35,7 @@ use rpi_ai::types::{
     ToolResultMessage, ToolResultRole,
 };
 use rpi_ai::validate_tool_arguments;
+use rpi_ai::{ProviderAuthenticationOutcome, ProviderAuthenticationResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -539,6 +540,17 @@ async fn stream_assistant_response(
             }
             terminal @ (AssistantMessageEvent::Done { .. }
             | AssistantMessageEvent::Error { .. }) => {
+                let authentication_outcome = match &terminal {
+                    AssistantMessageEvent::Done { .. } => {
+                        Some(ProviderAuthenticationOutcome::Accepted)
+                    }
+                    AssistantMessageEvent::Error {
+                        reason: rpi_ai::types::ErrorReason::Authentication,
+                        ..
+                    } => Some(ProviderAuthenticationOutcome::Rejected),
+                    AssistantMessageEvent::Error { .. } => None,
+                    _ => unreachable!("terminal arm only matches terminal provider events"),
+                };
                 if let AssistantMessageEvent::Error { reason, .. } = &terminal {
                     emit_event(emit, AgentEvent::ProviderError { reason: *reason }).await;
                 }
@@ -547,6 +559,19 @@ async fn stream_assistant_response(
                         "assistant-message event stream ended without a terminal event".into(),
                     )
                 })?;
+                if let Some(outcome) = authentication_outcome {
+                    emit_event(
+                        emit,
+                        AgentEvent::ProviderAuthentication {
+                            result: ProviderAuthenticationResult {
+                                provider_id: config.model.provider.clone(),
+                                model_id: config.model.id.clone(),
+                                outcome,
+                            },
+                        },
+                    )
+                    .await;
+                }
                 report_provider_continuation(config, &final_message);
                 let am = AgentMessage::Assistant(Box::new(final_message.clone()));
                 if added_partial {

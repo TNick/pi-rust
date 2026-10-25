@@ -4172,7 +4172,7 @@ mod tests {
 
         assert_eq!(body["previous_response_id"], "resp_anchor");
         assert_eq!(body["input"].as_array().unwrap().len(), 1);
-        assert_eq!(body["input"][0]["content"][0]["text"], "new input");
+        assert_eq!(body["input"][0]["content"], "new input");
         assert_eq!(body["store"], true);
     }
 
@@ -4191,7 +4191,7 @@ mod tests {
 
         assert_eq!(body["previous_response_id"], "resp_missing");
         assert_eq!(body["input"].as_array().unwrap().len(), 1);
-        assert_eq!(body["input"][0]["content"][0]["text"], "new input");
+        assert_eq!(body["input"][0]["content"], "new input");
     }
 
     #[test]
@@ -4236,6 +4236,6 @@ mod tests {
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "call_1");
-        assert_eq!(input[1]["content"][0]["text"], "continue");
+        assert_eq!(input[1]["content"], "continue");
     }
 }

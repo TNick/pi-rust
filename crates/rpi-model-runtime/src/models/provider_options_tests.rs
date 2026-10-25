@@ -90,10 +90,10 @@ fn schema_backed_model_property_editor_api() {
                 "vendor_mode": {
                     "type": "string",
                     "title": "Reasoning effort",
-                    "enum": ["low", "high"],
+                    "enum": ["low", "high", "strict"],
                     "default": "low"
                 },
-                "reasoning_budget": {"type": "integer"}
+                "provider_budget": {"type": "integer"}
             },
             "required": ["vendor_mode"],
             "additionalProperties": false
@@ -114,11 +114,11 @@ fn schema_backed_model_property_editor_api() {
         .expect("valid property value");
     let mut values = Map::new();
     values.insert("vendor_mode".to_owned(), serde_json::json!("strict"));
-    values.insert("reasoning_budget".to_owned(), serde_json::json!("4096"));
+    values.insert("provider_budget".to_owned(), serde_json::json!("4096"));
     set_model_properties(&mut model, values).expect("whole object validation and coercion");
-    assert_eq!(model.provider_options["reasoning_budget"], 4096);
+    assert_eq!(model.provider_options["provider_budget"], 4096);
     assert_eq!(
-        model.validated_provider_options().unwrap()["reasoning_budget"],
+        model.validated_provider_options().unwrap()["provider_budget"],
         4096
     );
 }

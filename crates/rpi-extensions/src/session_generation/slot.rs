@@ -85,6 +85,26 @@ impl ExtensionGenerationSlot {
         )
     }
 
+    /// Reads the live generation while holding the publication gate.
+    ///
+    /// A host can snapshot catalog rows inside `read` to ensure that its
+    /// extension generation and catalog revision come from one publication.
+    /// The closure must not call back into this slot or block indefinitely.
+    ///
+    /// # Parameters
+    /// - `read`: Read operation that uses the current generation.
+    ///
+    /// # Returns
+    /// The value produced by `read` while publication is excluded.
+    pub fn with_current<R>(&self, read: impl FnOnce(&Arc<SessionGeneration>) -> R) -> R {
+        let current = self
+            .inner
+            .current
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        read(&current)
+    }
+
     /// The live generation's id.
     ///
     /// # Returns

@@ -18,7 +18,7 @@ use common::{
     user_message,
 };
 use rpi_agent::{AgentContext, AgentEvent};
-use rpi_ai::types::StopReason;
+use rpi_ai::types::{ErrorReason, StopReason};
 
 /// A scripted echo tool — mirrors the TS `echo` tool used across
 /// `agent-loop.test.ts`. Records every `value` it executed so tests can assert
@@ -121,15 +121,26 @@ async fn emits_event_types_for_text_turn() {
     );
     assert!(tags.contains(&"turn_end"), "missing turn_end: {tags:?}");
     assert!(tags.contains(&"agent_end"), "missing agent_end: {tags:?}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ProviderAuthentication { result }
+                if result.provider_id == "mock"
+                    && result.model_id == "mock"
+                    && result.outcome == rpi_ai::ProviderAuthenticationOutcome::Accepted
+        )),
+        "successful provider response did not report authentication evidence: {events:?}"
+    );
 }
 
 #[tokio::test]
 async fn emits_exact_sequence_when_should_stop_after_turn() {
     // Mirrors TS "should stop after the current turn when shouldStopAfterTurn
-    // returns true". The exact 12-event sequence:
+    // returns true". The exact event sequence includes upstream auth evidence:
     //   agent_start, turn_start,
     //   message_start, message_end,        (user prompt)
-    //   message_start, message_end,        (assistant tool-call message)
+    //   message_start, provider_authentication, message_end,
+    //                                      (assistant tool-call message)
     //   tool_execution_start, tool_execution_end,
     //   message_start, message_end,        (tool result)
     //   turn_end, agent_end.
@@ -191,6 +202,7 @@ async fn emits_exact_sequence_when_should_stop_after_turn() {
             "message_start",
             "message_end",
             "message_start",
+            "provider_authentication",
             "message_end",
             "tool_execution_start",
             "tool_execution_end",
@@ -200,6 +212,46 @@ async fn emits_exact_sequence_when_should_stop_after_turn() {
             "agent_end",
         ]
     );
+}
+
+#[tokio::test]
+async fn emits_rejected_authentication_result_for_typed_auth_failure() {
+    use rpi_ai::event_stream::create_assistant_message_event_stream;
+    use rpi_ai::types::{AssistantMessage, AssistantMessageEvent};
+
+    let stream_fn = rpi_agent::stream_fn(|model, _context, _options| {
+        let (mut producer, stream) = create_assistant_message_event_stream();
+        let api = model.api.clone();
+        let provider = model.provider.clone();
+        let model_id = model.id.clone();
+        tokio::spawn(async move {
+            producer.push(AssistantMessageEvent::Error {
+                reason: ErrorReason::Authentication,
+                error: AssistantMessage::terminal(
+                    api,
+                    provider,
+                    model_id,
+                    StopReason::Error,
+                    "authentication rejected",
+                    0,
+                ),
+            });
+        });
+        stream
+    });
+    let (events, _) = run_and_collect(
+        vec![user_message("hello")],
+        AgentContext::default(),
+        base_config(),
+        stream_fn,
+    )
+    .await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderAuthentication { result }
+            if result.outcome == rpi_ai::ProviderAuthenticationOutcome::Rejected
+    )));
 }
 
 #[tokio::test]

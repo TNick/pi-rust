@@ -1042,6 +1042,34 @@ pub enum ErrorReason {
     Error,
 }
 
+/// Provider response evidence for one request's authentication status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderAuthenticationOutcome {
+    /// The provider returned a successful response for the request.
+    Accepted,
+    /// The provider explicitly rejected the request authentication.
+    Rejected,
+}
+
+/// Secret-free authentication evidence for one provider model request.
+///
+/// # Public members
+/// - `provider_id`: Upstream provider identifier.
+/// - `model_id`: Provider-scoped model identifier.
+/// - `outcome`: Provider-reported outcome for the request.
+///
+/// # Private members
+/// None.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderAuthenticationResult {
+    /// Upstream provider identifier.
+    pub provider_id: String,
+    /// Provider-scoped model identifier.
+    pub model_id: String,
+    /// Provider-reported outcome for the request.
+    pub outcome: ProviderAuthenticationOutcome,
+}
+
 impl ErrorReason {
     pub fn as_str(self) -> &'static str {
         match self {

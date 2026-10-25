@@ -80,6 +80,7 @@ struct MutableAgentState {
     pending_tool_calls: HashSet<String>,
     error_message: Option<String>,
     provider_error_reason: Option<rpi_ai::types::ErrorReason>,
+    provider_authentication: Option<rpi_ai::ProviderAuthenticationResult>,
 }
 
 impl MutableAgentState {
@@ -95,6 +96,7 @@ impl MutableAgentState {
             pending_tool_calls: self.pending_tool_calls.clone(),
             error_message: self.error_message.clone(),
             provider_error_reason: self.provider_error_reason,
+            provider_authentication: self.provider_authentication.clone(),
         }
     }
 
@@ -103,9 +105,13 @@ impl MutableAgentState {
         match event {
             AgentEvent::AgentStart => {
                 self.provider_error_reason = None;
+                self.provider_authentication = None;
             }
             AgentEvent::ProviderError { reason } => {
                 self.provider_error_reason = Some(*reason);
+            }
+            AgentEvent::ProviderAuthentication { result } => {
+                self.provider_authentication = Some(result.clone());
             }
             AgentEvent::MessageStart { message } => {
                 // One clone per message (not per delta): the state holds the
@@ -343,6 +349,7 @@ impl AgentBuilder {
             pending_tool_calls: HashSet::new(),
             error_message: None,
             provider_error_reason: None,
+            provider_authentication: None,
         };
 
         let (event_tx, _) = broadcast::channel(256);
