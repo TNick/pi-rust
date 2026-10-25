@@ -313,12 +313,15 @@ pub fn safe_model_execution_configuration(model: &Model) -> SafeModelExecutionCo
     }
 
     let mut provider_options = BTreeMap::new();
-    if let Ok(descriptors) = crate::model_property_descriptors(model) {
+    if let (Ok(descriptors), Ok(validated_values)) = (
+        crate::model_property_descriptors(model),
+        model.validated_provider_options(),
+    ) {
         for descriptor in descriptors {
             if !descriptor.is_safe_for_generic_editor() {
                 continue;
             }
-            let Some(value) = descriptor.value else {
+            let Some(value) = validated_values.get(&descriptor.key).cloned() else {
                 continue;
             };
             let schema_type = descriptor.schema.get("type").and_then(Value::as_str);

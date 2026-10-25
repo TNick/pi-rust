@@ -1,10 +1,10 @@
 //! Tests safe model execution fingerprint coverage and secret omission.
 
 use rpi_ai::model::OpenaiCompletionsCompat;
-use rpi_ai::{Api, Model, StreamingProtocolCompat};
+use rpi_ai::{Api, Model, ProviderOptionsSchema, StreamingProtocolCompat};
 use serde_json::json;
 
-use super::{ModelExecutionExclusion as Exclusion, model_execution_fingerprint};
+use super::{model_execution_fingerprint, ModelExecutionExclusion as Exclusion};
 
 /// Creates a model with stable public identifiers and typed metadata.
 fn model() -> Model {
@@ -43,11 +43,9 @@ fn includes_public_ids_and_typed_metadata() {
     assert_ne!(original_fingerprint.sha256, changed_fingerprint.sha256);
     assert!(original_fingerprint.complete);
     assert!(original_fingerprint.endpoint_sha256.is_some());
-    assert!(
-        !original_fingerprint
-            .excluded_fields
-            .contains(&Exclusion::Endpoint)
-    );
+    assert!(!original_fingerprint
+        .excluded_fields
+        .contains(&Exclusion::Endpoint));
 }
 
 /// Uses endpoint identity without retaining its raw value.
@@ -64,6 +62,96 @@ fn safe_endpoint_changes_fingerprint_without_exposing_endpoint() {
     assert_ne!(first.endpoint_sha256, second.endpoint_sha256);
     let encoded = serde_json::to_string(&first).expect("fingerprint JSON");
     assert!(!encoded.contains(&original.base_url));
+}
+
+/// Includes recognized sampling values in the opaque execution identity.
+#[test]
+fn sampling_configuration_changes_fingerprint_without_becoming_excluded() {
+    let mut original = model();
+    original.sampling_params = Some(serde_json::Map::from_iter([(
+        "temperature".into(),
+        json!(0.2),
+    )]));
+    let mut changed = original.clone();
+    changed
+        .sampling_params
+        .as_mut()
+        .expect("sampling parameters")
+        .insert("temperature".into(), json!(0.7));
+
+    let first = model_execution_fingerprint(&original);
+    let second = model_execution_fingerprint(&changed);
+
+    assert_ne!(first.sha256, second.sha256);
+    assert!(first.complete);
+    assert!(!first.excluded_fields.contains(&Exclusion::SamplingParams));
+}
+
+/// Includes schema-safe provider options in the opaque execution identity.
+#[test]
+fn safe_provider_option_changes_fingerprint_without_exposing_its_value() {
+    let mut original = model();
+    original.provider_options_schema = Some(ProviderOptionsSchema {
+        version: 1,
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "future_vendor_tuning": {
+                    "type": "string",
+                    "enum": ["fast", "accurate"]
+                }
+            },
+            "additionalProperties": false
+        }),
+    });
+    original
+        .provider_options
+        .insert("future_vendor_tuning".into(), json!("fast"));
+    let mut changed = original.clone();
+    changed
+        .provider_options
+        .insert("future_vendor_tuning".into(), json!("accurate"));
+
+    let first = model_execution_fingerprint(&original);
+    let second = model_execution_fingerprint(&changed);
+
+    assert_ne!(first.sha256, second.sha256);
+    assert!(first.provider_options_included);
+    assert!(!first.excluded_fields.contains(&Exclusion::ProviderOptions));
+    let encoded = serde_json::to_string(&first).expect("fingerprint JSON");
+    assert!(!encoded.contains("fast"));
+}
+
+/// Excludes malformed options from the opaque execution identity.
+#[test]
+fn invalid_provider_option_values_are_counted_but_not_fingerprinted() {
+    let mut original = model();
+    original.provider_options_schema = Some(ProviderOptionsSchema {
+        version: 1,
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "vendor_mode": {"type": "string", "enum": ["fast", "accurate"]}
+            },
+            "additionalProperties": false
+        }),
+    });
+    original
+        .provider_options
+        .insert("vendor_mode".into(), json!("invalid-one"));
+    let mut changed = original.clone();
+    changed
+        .provider_options
+        .insert("vendor_mode".into(), json!("invalid-two"));
+
+    let first = model_execution_fingerprint(&original);
+    let second = model_execution_fingerprint(&changed);
+
+    assert_eq!(first.sha256, second.sha256);
+    assert!(!first.provider_options_included);
+    assert!(first.excluded_fields.contains(&Exclusion::ProviderOptions));
+    let encoded = serde_json::to_string(&first).expect("fingerprint JSON");
+    assert!(!encoded.contains("invalid-one"));
 }
 
 /// Excludes endpoints, auth headers, runtime options, and opaque values.

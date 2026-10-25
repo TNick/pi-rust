@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-const MODEL_EXECUTION_SCHEMA: &str = "rpi-model-execution-v2";
+const MODEL_EXECUTION_SCHEMA: &str = "rpi-model-execution-v3";
 
 /// Describes the legacy model-configuration digest coverage.
 ///
 /// # Public members
 /// - `sha256`: Digest from the conservative execution projection.
 /// - `headers_excluded`: Always true; request headers are omitted.
-/// - `provider_options_included`: Always false; opaque options are omitted.
+/// - `provider_options_included`: Whether all options were safe and included.
 ///
 /// # Private members
 /// None.
@@ -70,10 +70,11 @@ pub enum ModelExecutionExclusion {
 /// - `api_id`: Public provider API identifier.
 /// - `sha256`: Digest of the canonical safe typed projection.
 /// - `endpoint_sha256`: Digest of the safe normalized endpoint, when available.
-/// - `complete`: Whether omitted values cannot affect execution.
+/// - `complete`: Whether every request-relevant model configuration value is
+///   represented by this model-configuration identity.
 /// - `excluded_fields`: Present excluded fields that limit coverage.
 /// - `headers_excluded`: Always true; request headers never enter the digest.
-/// - `provider_options_included`: Always false; opaque options never enter it.
+/// - `provider_options_included`: Whether all present options enter its digest.
 ///
 /// # Private members
 /// None.
@@ -93,23 +94,26 @@ pub struct ModelExecutionFingerprint {
     /// Digest of the normalized endpoint when it has no user information,
     /// query, or fragment.
     pub endpoint_sha256: Option<String>,
-    /// Whether omitted values cannot affect the model execution.
+    /// Whether every request-relevant model configuration value is represented.
     pub complete: bool,
     /// Present fields omitted because their safety or semantics are unknown.
     pub excluded_fields: Vec<ModelExecutionExclusion>,
     /// Whether request headers were excluded from the projection.
     pub headers_excluded: bool,
-    /// Whether runtime-only provider options were included in the digest.
+    /// Whether every present provider option was safe and entered the digest.
     pub provider_options_included: bool,
 }
 
 /// Fingerprints a conservative typed projection of upstream model metadata.
 ///
-/// Stable public IDs and typed fields are included. Validated endpoint URLs
+/// Stable public IDs and typed fields are included. Recognized sampling
+/// parameters and schema-validated safe scalar provider options also affect
+/// the digest through the versioned execution-configuration projection.
+/// Validated endpoint URLs
 /// without user information, query, or fragment contribute a digest, never
 /// their raw value. Unsafe endpoints and headers,
-/// runtime-only options, arbitrary sampling JSON, unconstrained thinking maps,
-/// and opaque compatibility JSON are excluded. Provider-owned safe
+/// unsafe or undeclared provider options, unrecognized sampling JSON,
+/// unconstrained thinking maps, and opaque compatibility JSON are excluded. Provider-owned safe
 /// projections are still required for currently opaque request-shaping fields.
 ///
 /// # Parameters
@@ -118,6 +122,7 @@ pub struct ModelExecutionFingerprint {
 /// # Returns
 /// A versioned digest with explicit excluded-field and coverage metadata.
 pub fn model_execution_fingerprint(model: &Model) -> ModelExecutionFingerprint {
+    let safe_execution_configuration = crate::safe_model_execution_configuration(model);
     let mut projection = Map::new();
     projection.insert(
         "schemaVersion".into(),
@@ -152,6 +157,11 @@ pub fn model_execution_fingerprint(model: &Model) -> ModelExecutionFingerprint {
     projection.insert("costConfigured".into(), Value::Bool(model.cost_configured));
     projection.insert("contextWindow".into(), Value::from(model.context_window));
     projection.insert("maxTokens".into(), Value::from(model.max_tokens));
+    projection.insert(
+        "executionConfiguration".into(),
+        serde_json::to_value(&safe_execution_configuration)
+            .expect("safe execution configuration serialization is infallible"),
+    );
 
     let endpoint_sha256 = safe_endpoint_digest(&model.base_url);
     if let Some(endpoint_digest) = &endpoint_sha256 {
@@ -171,10 +181,10 @@ pub fn model_execution_fingerprint(model: &Model) -> ModelExecutionFingerprint {
     {
         excluded_fields.push(ModelExecutionExclusion::Headers);
     }
-    if !model.provider_options.is_empty() {
+    if safe_execution_configuration.excluded_provider_option_count > 0 {
         excluded_fields.push(ModelExecutionExclusion::ProviderOptions);
     }
-    if model.sampling_params.is_some() {
+    if safe_execution_configuration.excluded_sampling_parameter_count > 0 {
         excluded_fields.push(ModelExecutionExclusion::SamplingParams);
     }
     if model.thinking_level_map.is_some() {
@@ -209,7 +219,7 @@ pub fn model_execution_fingerprint(model: &Model) -> ModelExecutionFingerprint {
         complete: excluded_fields.is_empty(),
         excluded_fields,
         headers_excluded: true,
-        provider_options_included: false,
+        provider_options_included: safe_execution_configuration.excluded_provider_option_count == 0,
     }
 }
 
