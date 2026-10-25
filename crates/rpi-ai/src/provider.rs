@@ -17,6 +17,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroize;
 
 /// Provider-owned opaque state for continuing a prior response without replaying
 /// the full conversation context.
@@ -258,10 +259,80 @@ pub(crate) fn report_applied_request_settings<'a, I>(
         applied_values,
         request_body_sha256,
         request_header_sha256,
+        request_effect_sha256: None,
         provider_options: ProviderOptionsAttestation::default(),
         omitted_categories,
         complete: false,
     });
+}
+
+/// Reports a version-five prepared-request identity when safe coverage allows it.
+///
+/// The digest covers the final URL, JSON body, and provider-controlled headers.
+/// Credential material keys the digest and is never copied into the report.
+///
+/// # Parameters
+/// - `model`: Model descriptor used to prepare the request.
+/// - `callback`: Optional sink for the sanitized report.
+/// - `url`: Fully resolved provider request URL.
+/// - `body`: Final JSON request body.
+/// - `headers`: Final provider headers before transport-added headers.
+/// - `request_secret`: Optional host-protected credential and auth mode.
+pub(crate) fn report_applied_request_settings_with_effect<'a, I>(
+    model: &Model,
+    callback: Option<&AppliedRequestSettingsCallback>,
+    url: &str,
+    body: &serde_json::Value,
+    headers: I,
+    request_secret: Option<(&RequestSecret, bool)>,
+) where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let Some(callback) = callback else {
+        return;
+    };
+    let mut headers = headers
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let report_slot = Arc::new(std::sync::Mutex::new(None));
+    let report_sink = Arc::clone(&report_slot);
+    let capture: AppliedRequestSettingsCallback = Arc::new(move |report| {
+        *report_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+    });
+    report_applied_request_settings(
+        model,
+        Some(&capture),
+        body,
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    );
+    let Some(mut report) = report_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
+        return;
+    };
+    report.schema_version = "rpi-applied-request-settings-v5".to_owned();
+    report.request_effect_sha256 =
+        crate::request_effect_identity::fingerprint(url, body, &headers, request_secret);
+    if report.request_effect_sha256.is_some() {
+        report.omitted_categories.clear();
+        report.complete = true;
+    } else {
+        report
+            .omitted_categories
+            .push("request_effect_identity".to_owned());
+        report.complete = false;
+    }
+    callback(report);
+    for value in headers.values_mut() {
+        value.zeroize();
+    }
 }
 
 /// Default deadline for one LLM API request, including its streamed response.
@@ -302,6 +373,9 @@ pub struct AppliedRequestSettings {
     /// SHA-256 identity of exact allowlisted, non-sensitive header values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_header_sha256: Option<String>,
+    /// Opaque identity of the exact prepared request, including credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_effect_sha256: Option<String>,
     /// Opaque applied/transformed/ignored status for schema-safe provider options.
     #[serde(default)]
     pub provider_options: ProviderOptionsAttestation,
@@ -499,14 +573,68 @@ impl SimpleStreamOptions {
 #[cfg(test)]
 mod tests {
     use super::{
-        report_applied_request_settings, AppliedRequestSettings, AppliedRequestSettingsCallback,
-        Provider, ProviderContinuation, SimpleStreamOptions, DEFAULT_LLM_API_TIMEOUT,
+        report_applied_request_settings, report_applied_request_settings_with_effect,
+        AppliedRequestSettings, AppliedRequestSettingsCallback, Provider, ProviderContinuation,
+        RequestSecret, SecretMaterial, SimpleStreamOptions, DEFAULT_LLM_API_TIMEOUT,
     };
     use crate::model::Model;
     use crate::types::Api;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    /// Supplies one credential to the request-report test.
+    struct TestSecret(String);
+
+    impl SecretMaterial for TestSecret {
+        /// Exposes the test credential during the request callback.
+        ///
+        /// # Parameters
+        /// - `consumer`: Callback that reads the credential synchronously.
+        fn with_secret(&self, consumer: &mut dyn FnMut(&str)) {
+            consumer(&self.0);
+        }
+    }
+
+    /// Verifies complete reports carry only an opaque effect identity.
+    #[test]
+    fn complete_report_contains_keyed_request_effect_without_credentials() {
+        let model = Model::new(
+            "model-a",
+            "Model A",
+            Api::OpenaiCompletions,
+            "provider-a",
+            "https://example.invalid/v1",
+        );
+        let reports = Arc::new(Mutex::new(Vec::<AppliedRequestSettings>::new()));
+        let sink = Arc::clone(&reports);
+        let callback: AppliedRequestSettingsCallback =
+            Arc::new(move |report| sink.lock().unwrap().push(report));
+        let request_secret = RequestSecret::new(Arc::new(TestSecret(
+            "credential-report-sentinel".to_owned(),
+        )));
+        report_applied_request_settings_with_effect(
+            &model,
+            Some(&callback),
+            "https://example.invalid/v1/chat/completions",
+            &json!({"model": "model-a", "input": "private prompt sentinel"}),
+            [
+                ("content-type", "application/json"),
+                ("authorization", "Bearer credential-report-sentinel"),
+            ],
+            Some((&request_secret, true)),
+        );
+
+        let reports = reports.lock().unwrap();
+        let report = &reports[0];
+        assert_eq!(report.schema_version, "rpi-applied-request-settings-v5");
+        assert!(report.complete);
+        assert!(report.omitted_categories.is_empty());
+        assert_eq!(report.request_effect_sha256.as_deref().unwrap().len(), 64);
+        let encoded = serde_json::to_string(report).expect("report JSON");
+        assert!(!encoded.contains("credential-report-sentinel"));
+        assert!(!encoded.contains("private prompt sentinel"));
+    }
 
     /// Captures exact final-body identity without retaining request content.
     #[test]

@@ -306,6 +306,7 @@ fn incomplete_settings(model: &Model) -> rpi_ai::AppliedRequestSettings {
         applied_values: Default::default(),
         request_body_sha256: None,
         request_header_sha256: None,
+        request_effect_sha256: None,
         provider_options: rpi_ai::ProviderOptionsAttestation::default(),
         omitted_categories: vec![
             "extension_managed_request_transforms".to_owned(),

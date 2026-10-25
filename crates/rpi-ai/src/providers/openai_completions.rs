@@ -8,17 +8,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
-use crate::AiError;
 use crate::event_stream::{
-    AssistantMessageEventStream, AssistantMessageEventStreamProducer,
-    create_assistant_message_event_stream,
+    create_assistant_message_event_stream, AssistantMessageEventStream,
+    AssistantMessageEventStreamProducer,
 };
 use crate::model::{MaxTokensField, Model, StreamingProtocolCompat};
 use crate::provider::{
+    reject_opaque_provider_options, report_applied_request_settings_with_effect,
     AppliedRequestSettingsCallback, Provider, RequestSecret, SimpleStreamOptions,
-    reject_opaque_provider_options, report_applied_request_settings,
 };
 use crate::providers::anthropic::cost::calculate_cost;
 use crate::providers::anthropic::json_parse::parse_streaming_json;
@@ -30,6 +29,7 @@ use crate::types::{
     InputModality, Message, ThinkingContent, ThinkingContentType, ThinkingLevel, ToolCall,
     ToolCallType, Usage, UserContent,
 };
+use crate::AiError;
 use zeroize::Zeroizing;
 
 /// Provider for OpenAI's streaming Chat Completions wire protocol.
@@ -335,13 +335,17 @@ async fn run_stream(
 
     let body = build_request(model, ctx, opts);
     let url = chat_completions_url(&model.base_url);
-    report_applied_request_settings(
+    report_applied_request_settings_with_effect(
         model,
         applied_settings_callback.as_ref(),
+        &url,
         &body,
         headers
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str())),
+        protected_secret
+            .as_ref()
+            .map(|(secret, bearer)| (secret, *bearer)),
     );
     // A silent/stalled gateway must not leave the harness in Working forever.
     // Callers can override this through SimpleStreamOptions when needed.
@@ -1576,11 +1580,9 @@ mod tests {
             headers.get("authorization").map(String::as_str),
             Some("Bearer gateway-key")
         );
-        assert!(
-            headers
-                .values()
-                .all(|value| value != "Bearer official-openai-key")
-        );
+        assert!(headers
+            .values()
+            .all(|value| value != "Bearer official-openai-key"));
     }
 
     #[test]
@@ -1654,11 +1656,9 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[1]["role"], "user");
-        assert!(
-            messages
-                .iter()
-                .all(|message| message["role"] != "assistant")
-        );
+        assert!(messages
+            .iter()
+            .all(|message| message["role"] != "assistant"));
     }
 
     #[test]

@@ -393,6 +393,7 @@ fn incomplete_applied_settings_report(model: &Model) -> AppliedRequestSettings {
         applied_values: Default::default(),
         request_body_sha256: None,
         request_header_sha256: None,
+        request_effect_sha256: None,
         provider_options: rpi_ai::ProviderOptionsAttestation::default(),
         omitted_categories: vec![
             "extension_managed_request_transforms".to_owned(),
@@ -1172,6 +1173,7 @@ fn normalize_extension_report(
         "appliedValues",
         "requestBodySha256",
         "requestHeaderSha256",
+        "requestEffectSha256",
         "providerOptions",
         "omittedCategories",
         "complete",
@@ -1184,12 +1186,18 @@ fn normalize_extension_report(
                 | "rpi-applied-request-settings-v2"
                 | "rpi-applied-request-settings-v3"
                 | "rpi-applied-request-settings-v4"
+                | "rpi-applied-request-settings-v5"
         )
         || (schema == "rpi-applied-request-settings-v1" && object.contains_key("requestBodySha256"))
         || (schema != "rpi-applied-request-settings-v3"
             && schema != "rpi-applied-request-settings-v4"
+            && schema != "rpi-applied-request-settings-v5"
             && object.contains_key("requestHeaderSha256"))
-        || (schema != "rpi-applied-request-settings-v4" && object.contains_key("providerOptions"))
+        || (schema != "rpi-applied-request-settings-v4"
+            && schema != "rpi-applied-request-settings-v5"
+            && object.contains_key("providerOptions"))
+        || (schema != "rpi-applied-request-settings-v5"
+            && object.contains_key("requestEffectSha256"))
     {
         return None;
     }
@@ -1204,6 +1212,11 @@ fn normalize_extension_report(
     }) {
         return None;
     }
+    if report.request_effect_sha256.as_ref().is_some_and(|digest| {
+        digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return None;
+    }
     if report.provider_id != model.provider
         || report.model_id != model.id
         || report.api_id != model.api.as_str()
@@ -1211,6 +1224,8 @@ fn normalize_extension_report(
         || (schema == "rpi-applied-request-settings-v3"
             && (report.request_body_sha256.is_none() || report.request_header_sha256.is_none()))
         || (schema == "rpi-applied-request-settings-v4"
+            && (report.request_body_sha256.is_none() || report.request_header_sha256.is_none()))
+        || (schema == "rpi-applied-request-settings-v5"
             && (report.request_body_sha256.is_none() || report.request_header_sha256.is_none()))
     {
         return None;
@@ -1269,7 +1284,7 @@ fn normalize_extension_report(
         }
     }
     report.applied_values = safe_values;
-    if schema == "rpi-applied-request-settings-v4" {
+    if schema == "rpi-applied-request-settings-v4" || schema == "rpi-applied-request-settings-v5" {
         if !rpi_ai::validate_provider_option_attestation(model, &report.provider_options) {
             return None;
         }
@@ -1283,7 +1298,11 @@ fn normalize_extension_report(
         "tools_and_schemas".to_owned(),
         "unrecognized_request_fields".to_owned(),
     ];
-    if schema != "rpi-applied-request-settings-v4" || report.provider_options.omitted_count > 0 {
+    if !matches!(
+        schema,
+        "rpi-applied-request-settings-v4" | "rpi-applied-request-settings-v5"
+    ) || report.provider_options.omitted_count > 0
+    {
         report
             .omitted_categories
             .push("opaque_provider_options".to_owned());
@@ -2262,6 +2281,44 @@ mod tests {
         report["providerOptions"]["options"][0]["optionIdSha256"] =
             serde_json::json!("c".repeat(64));
         assert!(normalize_extension_report(&report, &model).is_none());
+    }
+
+    /// Accepts v5 reports while downgrading extension-owned completeness.
+    #[test]
+    fn extension_applied_settings_v5_preserves_digest_but_stays_incomplete() {
+        let model = Model::new(
+            "model-a",
+            "Model A",
+            rpi_ai::types::Api::OpenaiCompletions,
+            "provider-a",
+            "https://example.test",
+        );
+        let mut report = serde_json::json!({
+            "schemaVersion": "rpi-applied-request-settings-v5",
+            "providerId": "provider-a",
+            "modelId": "model-a",
+            "apiId": "openai-completions",
+            "appliedValues": {},
+            "requestBodySha256": "a".repeat(64),
+            "requestHeaderSha256": "b".repeat(64),
+            "requestEffectSha256": "c".repeat(64),
+            "omittedCategories": [],
+            "complete": true
+        });
+        report["providerOptions"] =
+            serde_json::to_value(rpi_ai::ProviderOptionsAttestation::default())
+                .expect("default provider option attestation JSON");
+
+        let normalized = normalize_extension_report(&report, &model)
+            .expect("valid version-five extension report");
+        assert_eq!(
+            normalized.request_effect_sha256.as_deref(),
+            Some("c".repeat(64).as_str())
+        );
+        assert!(!normalized.complete);
+        assert!(normalized
+            .omitted_categories
+            .contains(&"extension_managed_request_transforms".to_owned()));
     }
 
     /// Provider model options reach extension providers through the versioned

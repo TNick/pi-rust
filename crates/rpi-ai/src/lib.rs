@@ -27,6 +27,7 @@ pub mod provider_option_attestation;
 #[cfg(test)]
 mod provider_option_attestation_tests;
 pub mod providers;
+pub(crate) mod request_effect_identity;
 pub mod schema;
 pub(crate) mod strict_schema;
 pub mod types;

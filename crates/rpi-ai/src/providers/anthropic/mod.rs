@@ -22,13 +22,13 @@ pub mod sse;
 
 use crate::error::AiError;
 use crate::event_stream::{
-    AssistantMessageEventStream, AssistantMessageEventStreamProducer,
-    create_assistant_message_event_stream,
+    create_assistant_message_event_stream, AssistantMessageEventStream,
+    AssistantMessageEventStreamProducer,
 };
 use crate::model::{Model, StreamingProtocolCompat};
 use crate::provider::{
+    reject_opaque_provider_options, report_applied_request_settings_with_effect,
     AppliedRequestSettingsCallback, CacheRetention, Provider, RequestSecret, SimpleStreamOptions,
-    reject_opaque_provider_options, report_applied_request_settings,
 };
 use crate::types::{AssistantMessageEvent, Content, Context, DoneReason, StopReason, Usage};
 use async_trait::async_trait;
@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use crate::providers::anthropic::build_params::build_params;
 use crate::providers::anthropic::cost::calculate_cost;
-use crate::providers::anthropic::mapper::{MapperState, emit_terminal_error, run_mapper};
+use crate::providers::anthropic::mapper::{emit_terminal_error, run_mapper, MapperState};
 use crate::providers::anthropic::models::anthropic_models;
 use crate::providers::anthropic::retry::retry_provider_request;
 use crate::providers::anthropic::sse::SseEventStream;
@@ -423,16 +423,17 @@ async fn run_anthropic_stream(
             api_key_for_header.as_deref(),
         )
     };
-    report_applied_request_settings(
+    let url = format!("{}/v1/messages", model.base_url.trim_end_matches('/'));
+    report_applied_request_settings_with_effect(
         model,
         applied_settings_callback.as_ref(),
+        &url,
         &body,
         headers
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str())),
+        protected_secret.as_ref().map(|secret| (secret, false)),
     );
-
-    let url = format!("{}/v1/messages", model.base_url.trim_end_matches('/'));
     let timeout = opts.request_timeout();
     let signal = opts.signal.clone();
 
