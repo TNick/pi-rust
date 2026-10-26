@@ -90,7 +90,7 @@ pub use oauth::{
 pub use package_roots::package_resource_dirs;
 pub use project_packages::{ProjectPackage, ProjectPackageRegistry};
 pub use prompt_transform::emit_before_agent_start;
-pub use provider::PluggableProvider;
+pub use provider::{PluggableProvider, ProviderHttpHost};
 pub use provider_hooks::ExtensionProviderHooks;
 pub use provider_reload::{
     active_provider_was_removed, providers_for_reload, requires_provider_catalog_refresh,

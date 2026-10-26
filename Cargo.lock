@@ -2395,6 +2395,7 @@ dependencies = [
  "fs2",
  "futures",
  "libloading",
+ "reqwest",
  "rpi-agent",
  "rpi-ai",
  "rpi-plugin-sdk",
@@ -2406,6 +2407,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 

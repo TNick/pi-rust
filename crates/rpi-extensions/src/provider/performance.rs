@@ -209,6 +209,7 @@ fn offline_provider_pipeline() {
                         snapshot,
                         PluginKeepalive::empty(),
                         Handle::current(),
+                        None,
                     );
                     let mut stream = provider.stream_simple(&model, &context, &options).await;
                     if !result_only {

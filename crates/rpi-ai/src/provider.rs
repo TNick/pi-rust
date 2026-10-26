@@ -386,6 +386,64 @@ pub struct AppliedRequestSettings {
     pub complete: bool,
 }
 
+/// Builds safe provenance for the exact HTTP request sent by a trusted host.
+///
+/// The host calls this only after validating the final URL, body, and headers
+/// and immediately before sending that request. Sensitive header values
+/// contribute through a keyed digest and are never copied into the report.
+///
+/// # Parameters
+/// - `model`: Host-selected model whose public identity binds the report.
+/// - `url`: Exact prepared POST URL.
+/// - `body`: Exact prepared JSON request body.
+/// - `headers`: Exact prepared request headers.
+///
+/// # Returns
+/// Version-5 safe provenance, complete only when all request effects can be
+/// fingerprinted under the conservative endpoint and header policy.
+pub fn applied_settings_for_prepared_http_request(
+    model: &Model,
+    url: &str,
+    body: &serde_json::Value,
+    headers: &BTreeMap<String, String>,
+) -> AppliedRequestSettings {
+    let report_slot = Arc::new(std::sync::Mutex::new(None));
+    let report_sink = Arc::clone(&report_slot);
+    let callback: AppliedRequestSettingsCallback = Arc::new(move |report| {
+        *report_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+    });
+    report_applied_request_settings_with_effect(
+        model,
+        Some(&callback),
+        url,
+        body,
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+        None,
+    );
+    let report = report_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .unwrap_or_else(|| AppliedRequestSettings {
+            schema_version: "rpi-applied-request-settings-v5".to_owned(),
+            provider_id: model.provider.clone(),
+            model_id: model.id.clone(),
+            api_id: model.api.as_str().to_owned(),
+            applied_values: BTreeMap::new(),
+            request_body_sha256: None,
+            request_header_sha256: None,
+            request_effect_sha256: None,
+            provider_options: ProviderOptionsAttestation::default(),
+            omitted_categories: vec!["request_effect_identity".to_owned()],
+            complete: false,
+        });
+    report
+}
+
 /// Callback invoked after a provider assembles its final prepared request report.
 pub type AppliedRequestSettingsCallback = Arc<dyn Fn(AppliedRequestSettings) + Send + Sync>;
 

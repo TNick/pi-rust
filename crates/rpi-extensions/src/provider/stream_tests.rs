@@ -79,7 +79,7 @@ async fn cancellation_finishes_before_an_uncooperative_plugin_and_retains_its_li
     let snapshot = Arc::new(ExtensionRegistry::new().snapshot());
     let keepalive = PluginKeepalive::empty();
     let weak = Arc::downgrade(&keepalive);
-    let provider = PluggableProvider::new(record, snapshot, keepalive, Handle::current());
+    let provider = PluggableProvider::new(record, snapshot, keepalive, Handle::current(), None);
     let model = Model::new("m", "M", Api::Faux, "probe", "https://example");
     let options = SimpleStreamOptions::default();
     let scope = Arc::new(rpi_agent::tool_execution_scope::ToolExecutionScope::default());

@@ -52,9 +52,9 @@ use rpi_plugin_sdk::callbacks::OwnedString;
 use rpi_plugin_sdk::{StbString, StbStringRef};
 use tokio::runtime::Handle;
 
+use crate::PluginKeepalive;
 use crate::loader::ExtensionSession;
 use crate::registry::{RegisteredProvider, RegistrySnapshot};
-use crate::PluginKeepalive;
 
 #[cfg(test)]
 mod lifetime_tests;
@@ -111,14 +111,43 @@ pub struct PluggableProvider {
     runtime: Handle,
     models: Vec<Model>,
     provider_options_v1: bool,
+    http_host: Option<Arc<dyn ProviderHttpHost>>,
+}
+
+/// Trusted host transport for prepared requests made by a provider extension.
+pub trait ProviderHttpHost: Send + Sync {
+    /// Sends one provider-prepared request and returns the host response JSON.
+    ///
+    /// # Parameters
+    /// - `model`: Host-selected model bound to this invocation.
+    /// - `request_json`: Provider-prepared request in the versioned HTTP envelope.
+    ///
+    /// # Returns
+    /// The HTTP response and host-generated applied-request-settings report.
+    ///
+    /// # Errors
+    /// Returns a safe transport or policy failure.
+    fn request(&self, model: &Model, request_json: &str) -> Result<String, String>;
 }
 
 impl PluggableProvider {
+    /// Builds one provider adapter with its immutable extension registration.
+    ///
+    /// # Parameters
+    /// - `record`: Provider callbacks and identity from the registry snapshot.
+    /// - `snapshot`: Immutable extension registry snapshot.
+    /// - `keepalive`: Plugin lifetime owner retained during provider calls.
+    /// - `runtime`: Tokio runtime used to execute blocking callbacks.
+    /// - `http_host`: Optional trusted transport for protected HTTP requests.
+    ///
+    /// # Returns
+    /// A provider adapter retaining all callback dependencies.
     fn new(
         record: RegisteredProvider,
         snapshot: Arc<RegistrySnapshot>,
         keepalive: Arc<PluginKeepalive>,
         runtime: Handle,
+        http_host: Option<Arc<dyn ProviderHttpHost>>,
     ) -> Arc<Self> {
         let manifest = snapshot.provider_manifest(&record.provider_id);
         let models = manifest
@@ -133,6 +162,7 @@ impl PluggableProvider {
             runtime,
             models,
             provider_options_v1,
+            http_host,
         })
     }
 
@@ -143,6 +173,23 @@ impl PluggableProvider {
     /// runtime (pi-cli builds providers on the async main thread, same as the
     /// `ActionBridge`).
     pub fn from_session(session: &ExtensionSession, runtime: Handle) -> Vec<Arc<dyn Provider>> {
+        Self::from_session_with_http_host(session, runtime, None)
+    }
+
+    /// Build providers with an optional trusted HTTP request host.
+    ///
+    /// # Parameters
+    /// - `session`: Loaded extension session owning the provider registrations.
+    /// - `runtime`: Runtime used to drive blocking extension callbacks.
+    /// - `http_host`: Host-mediated transport available to protected requests.
+    ///
+    /// # Returns
+    /// One provider adapter per registered provider.
+    pub fn from_session_with_http_host(
+        session: &ExtensionSession,
+        runtime: Handle,
+        http_host: Option<Arc<dyn ProviderHttpHost>>,
+    ) -> Vec<Arc<dyn Provider>> {
         let Some(snapshot) = session.snapshot_arc() else {
             return Vec::new();
         };
@@ -157,6 +204,7 @@ impl PluggableProvider {
                     Arc::clone(&snapshot),
                     Arc::clone(&keepalive),
                     runtime.clone(),
+                    http_host.clone(),
                 ) as Arc<dyn Provider>
             })
             .collect()
@@ -185,6 +233,7 @@ impl PluggableProvider {
         let snapshot = Arc::clone(&self.snapshot);
         let record = self.record.clone();
         let runtime = self.runtime.clone();
+        let http_host = self.http_host.clone();
         let lifetime = ProviderRequestLifetime::new(Arc::clone(&self._keepalive));
         let model = model.clone();
         let ctx = Arc::new(ctx.clone());
@@ -215,6 +264,7 @@ impl PluggableProvider {
                     &ctx,
                     &opts,
                     secret,
+                    http_host.clone(),
                     Arc::clone(&request_applied_report),
                     &mut prod,
                 )
@@ -233,6 +283,7 @@ impl PluggableProvider {
                     &ctx,
                     &opts,
                     secret,
+                    http_host.clone(),
                     Arc::clone(&request_applied_report),
                     &mut prod,
                 )
@@ -251,6 +302,7 @@ impl PluggableProvider {
                             &opts,
                             Some(secret),
                             bearer,
+                            http_host.clone(),
                             Arc::clone(&request_applied_report),
                         )
                         .await
@@ -267,6 +319,7 @@ impl PluggableProvider {
                             &opts,
                             None,
                             false,
+                            http_host.clone(),
                             Arc::clone(&request_applied_report),
                         )
                         .await
@@ -520,6 +573,7 @@ async fn drive_protected_plugin_provider(
     opts: &SimpleStreamOptions,
     secret: Option<RequestSecret>,
     bearer: bool,
+    http_host: Option<Arc<dyn ProviderHttpHost>>,
     applied_report: Arc<Mutex<Option<AppliedRequestSettings>>>,
 ) -> AssistantMessage {
     if !snapshot.is_active() {
@@ -558,6 +612,7 @@ async fn drive_protected_plugin_provider(
         headers: protected_headers(model, opts),
         applied_report,
         expected_model: model.clone(),
+        http_host,
     });
     let join = runtime.spawn_blocking(move || {
         let _lifetime = lifetime;
@@ -870,6 +925,7 @@ async fn drive_streaming_plugin_provider(
     ctx: &Context,
     opts: &SimpleStreamOptions,
     secret: Option<(RequestSecret, bool)>,
+    http_host: Option<Arc<dyn ProviderHttpHost>>,
     applied_report: Arc<Mutex<Option<AppliedRequestSettings>>>,
     prod: &mut AssistantMessageEventStreamProducer,
 ) -> AssistantMessage {
@@ -919,6 +975,7 @@ async fn drive_streaming_plugin_provider(
         headers: protected_headers(model, opts),
         applied_report,
         expected_model: model.clone(),
+        http_host,
     });
 
     let record_owned = record.clone();
@@ -1110,6 +1167,8 @@ struct ProviderControlOwner {
     applied_report: Arc<Mutex<Option<AppliedRequestSettings>>>,
     /// Request identity used to validate reports.
     expected_model: Model,
+    /// Optional trusted host transport for exact outbound request mediation.
+    http_host: Option<Arc<dyn ProviderHttpHost>>,
 }
 
 /// Accept and normalize a plugin's report for the active model request.
@@ -1153,6 +1212,56 @@ extern "C" fn control_report_applied_settings(
     .unwrap_or(1)
 }
 
+/// Sends a prepared provider request through the configured trusted host.
+extern "C" fn control_provider_http_request(
+    request_json: StbStringRef,
+    consumer: rpi_plugin_sdk::ProviderHttpResponseConsumerFn,
+    consumer_user_data: *mut c_void,
+    control_user_data: *mut c_void,
+) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if control_user_data.is_null() || consumer_user_data.is_null() {
+            return 1;
+        }
+        // SAFETY: the owner remains alive for the complete plugin request call.
+        let owner = unsafe { &*(control_user_data as *const ProviderControlOwner) };
+        let Some(host) = owner.http_host.as_ref() else {
+            return 1;
+        };
+        let request = unsafe { request_json.as_str() };
+        if request.len() > 2 * 1024 * 1024 {
+            return 1;
+        }
+        let mut slot = owner
+            .applied_report
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
+            return 1;
+        }
+        let Ok(response) = host.request(&owner.expected_model, request) else {
+            return 1;
+        };
+        if response.len() > 16 * 1024 * 1024 {
+            return 1;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&response) else {
+            return 1;
+        };
+        let Some(report_value) = value.get("appliedSettings") else {
+            return 1;
+        };
+        let Some(report) = normalize_host_applied_report(report_value, &owner.expected_model)
+        else {
+            return 1;
+        };
+        *slot = Some(report);
+        drop(slot);
+        consumer(StbStringRef::from_str(&response), consumer_user_data)
+    }))
+    .unwrap_or(1)
+}
+
 /// Retains only the supported applied-settings fields from an extension report.
 ///
 /// # Parameters
@@ -1163,6 +1272,23 @@ extern "C" fn control_report_applied_settings(
 fn normalize_extension_report(
     value: &serde_json::Value,
     model: &Model,
+) -> Option<AppliedRequestSettings> {
+    normalize_provider_report(value, model, false)
+}
+
+/// Validates an applied-settings report generated by the trusted host transport.
+fn normalize_host_applied_report(
+    value: &serde_json::Value,
+    model: &Model,
+) -> Option<AppliedRequestSettings> {
+    normalize_provider_report(value, model, true)
+}
+
+/// Validates one safe provider report while distinguishing host from extension claims.
+fn normalize_provider_report(
+    value: &serde_json::Value,
+    model: &Model,
+    host_verified: bool,
 ) -> Option<AppliedRequestSettings> {
     let object = value.as_object()?;
     const FIELDS: &[&str] = &[
@@ -1289,25 +1415,35 @@ fn normalize_extension_report(
             return None;
         }
     }
-    report.omitted_categories = vec![
-        "extension_managed_request_transforms".to_owned(),
-        "provider_applied_values_unavailable".to_owned(),
-        "endpoint".to_owned(),
-        "headers_and_credentials".to_owned(),
-        "prompt_and_transcript".to_owned(),
-        "tools_and_schemas".to_owned(),
-        "unrecognized_request_fields".to_owned(),
-    ];
-    if !matches!(
-        schema,
-        "rpi-applied-request-settings-v4" | "rpi-applied-request-settings-v5"
-    ) || report.provider_options.omitted_count > 0
-    {
-        report
-            .omitted_categories
-            .push("opaque_provider_options".to_owned());
+    if host_verified {
+        if report.complete
+            && (schema != "rpi-applied-request-settings-v5"
+                || report.request_effect_sha256.is_none()
+                || !report.omitted_categories.is_empty())
+        {
+            return None;
+        }
+    } else {
+        report.omitted_categories = vec![
+            "extension_managed_request_transforms".to_owned(),
+            "provider_applied_values_unavailable".to_owned(),
+            "endpoint".to_owned(),
+            "headers_and_credentials".to_owned(),
+            "prompt_and_transcript".to_owned(),
+            "tools_and_schemas".to_owned(),
+            "unrecognized_request_fields".to_owned(),
+        ];
+        if !matches!(
+            schema,
+            "rpi-applied-request-settings-v4" | "rpi-applied-request-settings-v5"
+        ) || report.provider_options.omitted_count > 0
+        {
+            report
+                .omitted_categories
+                .push("opaque_provider_options".to_owned());
+        }
+        report.complete = false;
     }
-    report.complete = false;
     Some(report)
 }
 
@@ -1392,6 +1528,10 @@ fn protected_control(owner: &ProviderControlOwner) -> rpi_plugin_sdk::ProtectedP
         report_applied_settings: Some(
             control_report_applied_settings as rpi_plugin_sdk::ProviderAppliedSettingsFn,
         ),
+        request_http: owner
+            .http_host
+            .as_ref()
+            .map(|_| control_provider_http_request as rpi_plugin_sdk::ProviderHttpRequestFn),
     }
 }
 
@@ -2170,6 +2310,7 @@ fn chunk_string(chunk: &serde_json::Value, field: &str) -> String {
 mod tests {
     use super::*;
     use crate::registry::ExtensionRegistry;
+    use std::collections::BTreeMap;
 
     /// Preserves valid version-2 body identities and rejects malformed digests.
     #[test]
@@ -2274,9 +2415,11 @@ mod tests {
 
         let normalized = normalize_extension_report(&report, &model)
             .expect("valid version-four option attestation");
-        assert!(!normalized
-            .omitted_categories
-            .contains(&"opaque_provider_options".to_owned()));
+        assert!(
+            !normalized
+                .omitted_categories
+                .contains(&"opaque_provider_options".to_owned())
+        );
 
         report["providerOptions"]["options"][0]["optionIdSha256"] =
             serde_json::json!("c".repeat(64));
@@ -2316,9 +2459,136 @@ mod tests {
             Some("c".repeat(64).as_str())
         );
         assert!(!normalized.complete);
-        assert!(normalized
-            .omitted_categories
-            .contains(&"extension_managed_request_transforms".to_owned()));
+        assert!(
+            normalized
+                .omitted_categories
+                .contains(&"extension_managed_request_transforms".to_owned())
+        );
+    }
+
+    /// Relays one request through the trusted callback and rejects duplicates.
+    #[test]
+    fn protected_provider_http_callback_captures_one_host_verified_report() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Host(AtomicUsize);
+
+        impl ProviderHttpHost for Host {
+            /// Builds a deterministic host response for the callback test.
+            ///
+            /// # Parameters
+            /// - `model`: Bound test model.
+            /// - `request_json`: Prepared request envelope.
+            ///
+            /// # Returns
+            /// A host response containing a host-computed report.
+            ///
+            /// # Errors
+            /// Returns an error when request fields cannot be decoded.
+            fn request(&self, model: &Model, request_json: &str) -> Result<String, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let request: serde_json::Value =
+                    serde_json::from_str(request_json).map_err(|_| "bad request".to_owned())?;
+                let url = request["url"].as_str().ok_or("missing url")?;
+                let body = request.get("body").ok_or("missing body")?;
+                let headers: BTreeMap<String, String> =
+                    serde_json::from_value(request["headers"].clone())
+                        .map_err(|_| "bad headers".to_owned())?;
+                let report =
+                    rpi_ai::applied_settings_for_prepared_http_request(model, url, body, &headers);
+                serde_json::to_string(&serde_json::json!({
+                    "status": 200,
+                    "body": {"ok": true},
+                    "appliedSettings": report,
+                }))
+                .map_err(|_| "bad response".to_owned())
+            }
+        }
+
+        /// Saves the borrowed response for the test assertion.
+        ///
+        /// # Parameters
+        /// - `response`: Borrowed host response JSON.
+        /// - `user_data`: Pointer to the test output mutex.
+        ///
+        /// # Returns
+        /// Zero after saving the response; one for a null test pointer.
+        extern "C" fn consume_response(response: StbStringRef, user_data: *mut c_void) -> i32 {
+            if user_data.is_null() {
+                return 1;
+            }
+            // SAFETY: the caller passes a live mutex and invokes this consumer synchronously.
+            let output = unsafe { &*(user_data as *const Mutex<Option<String>>) };
+            *output
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(unsafe { response.as_str() }.to_owned());
+            0
+        }
+
+        let model = Model::new(
+            "model-a",
+            "Model A",
+            rpi_ai::types::Api::OpenaiCompletions,
+            "provider-a",
+            "https://api.openai.com/v1/chat/completions",
+        );
+        let host = Arc::new(Host(AtomicUsize::new(0)));
+        let owner = Arc::new(ProviderControlOwner {
+            state: Arc::new(ProviderControlState::default()),
+            secret: None,
+            headers: Vec::new(),
+            applied_report: Arc::new(Mutex::new(None)),
+            expected_model: model,
+            http_host: Some(host.clone()),
+        });
+        let request = serde_json::json!({
+            "schemaVersion": "rpi-provider-http-request-v1",
+            "method": "POST",
+            "url": "https://api.openai.com/v1/chat/completions",
+            "headers": {"content-type": "application/json"},
+            "body": {"model": "model-a"}
+        })
+        .to_string();
+        let output: Mutex<Option<String>> = Mutex::new(None);
+        let user_data = &output as *const Mutex<Option<String>> as *mut c_void;
+        let control_data = Arc::as_ptr(&owner) as *mut c_void;
+
+        assert_eq!(
+            control_provider_http_request(
+                StbStringRef::from_str(&request),
+                consume_response,
+                user_data,
+                control_data,
+            ),
+            0
+        );
+        assert_eq!(host.0.load(Ordering::SeqCst), 1);
+        let response = output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("host response delivered synchronously");
+        assert!(response.contains("\"ok\":true"));
+        assert!(
+            owner
+                .applied_report
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|report| report.complete)
+        );
+        assert_ne!(
+            control_provider_http_request(
+                StbStringRef::from_str(&request),
+                consume_response,
+                user_data,
+                control_data,
+            ),
+            0,
+            "a second HTTP request would make one report incomplete"
+        );
+        assert_eq!(host.0.load(Ordering::SeqCst), 1);
     }
 
     /// Provider model options reach extension providers through the versioned
@@ -2412,12 +2682,14 @@ mod tests {
                 "additionalProperties": false
             }),
         });
-        assert!(request_envelope_json(
-            &model,
-            &Context::new(vec![]),
-            &SimpleStreamOptions::default(),
-        )
-        .is_err());
+        assert!(
+            request_envelope_json(
+                &model,
+                &Context::new(vec![]),
+                &SimpleStreamOptions::default(),
+            )
+            .is_err()
+        );
     }
 
     /// A callback state used to verify manifest-gated provider requests.
@@ -2511,6 +2783,7 @@ mod tests {
             provider_options_snapshot(None),
             PluginKeepalive::empty(),
             runtime.clone(),
+            None,
         );
         let mut legacy_empty_stream = legacy_provider
             .stream_simple(&model, &context, &options)
@@ -2572,6 +2845,7 @@ mod tests {
             provider_options_snapshot(Some(1)),
             PluginKeepalive::empty(),
             runtime,
+            None,
         );
         let mut opted_stream = opted_provider
             .stream_simple(&model_with_options, &context, &options)
@@ -2835,6 +3109,7 @@ mod tests {
                 &ctx,
                 &opts,
                 None,
+                None,
                 Arc::new(Mutex::new(None)),
                 &mut prod,
             )
@@ -2900,6 +3175,7 @@ mod tests {
                 "test-provider",
                 "https://example.test",
             ),
+            http_host: None,
         });
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
         let bridge = StreamEmitBridge {
@@ -2956,6 +3232,7 @@ mod tests {
                 "test-provider",
                 "https://example.test",
             ),
+            http_host: None,
         });
         let user_data = Arc::as_ptr(&owner) as *mut c_void;
         let content = rpi_plugin_sdk::ProviderChunkKind::Content as u32;

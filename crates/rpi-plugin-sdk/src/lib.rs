@@ -1374,6 +1374,48 @@ pub type ProviderHeadersFn = extern "C" fn(
 pub type ProviderAppliedSettingsFn =
     extern "C" fn(report_json: StbStringRef, control_user_data: *mut c_void) -> i32;
 
+/// Receives one borrowed response from a host-mediated provider HTTP request.
+///
+/// The response JSON view is valid only during this synchronous invocation.
+/// It contains the HTTP status, JSON response body, and the host-computed
+/// applied-request-settings report. Implementations must not
+/// retain the view or log credentials or response content.
+///
+/// # Parameters
+/// - `response_json`: Borrowed serialized host response.
+/// - `user_data`: Plugin-owned response consumer context.
+///
+/// # Returns
+/// Zero when the response is consumed successfully; nonzero on failure.
+pub type ProviderHttpResponseConsumerFn =
+    extern "C" fn(response_json: StbStringRef, user_data: *mut c_void) -> i32;
+
+/// Submits one prepared HTTP request to the trusted provider host.
+///
+/// The host transport, not the extension, sends the request and computes its
+/// effect identity from the exact request it transmits. The request JSON uses
+/// the versioned `rpi-provider-http-request-v1` envelope. The callback is
+/// available only to protected provider registrations; hosts without a
+/// mediated transport leave it unset. Direct network access must be denied to
+/// workers that rely on this callback.
+///
+/// # Parameters
+/// - `request_json`: Borrowed serialized prepared request.
+/// - `consumer`: Synchronous callback that consumes the host response.
+/// - `consumer_user_data`: Plugin-owned response consumer context.
+/// - `control_user_data`: Host control handle supplied in
+///   [`ProtectedProviderControl`].
+///
+/// # Returns
+/// Zero when the request and response callback succeed; nonzero when the host
+/// rejects or fails to execute the request.
+pub type ProviderHttpRequestFn = extern "C" fn(
+    request_json: StbStringRef,
+    consumer: ProviderHttpResponseConsumerFn,
+    consumer_user_data: *mut c_void,
+    control_user_data: *mut c_void,
+) -> i32;
+
 /// Versioned protected input available only to protected provider callbacks.
 ///
 /// The host passes this struct only through appended protected registration
@@ -1397,6 +1439,10 @@ pub struct ProtectedProviderControl {
     ///
     /// This field was appended; callers must check `struct_size` before reading.
     pub report_applied_settings: Option<ProviderAppliedSettingsFn>,
+    /// Submit the prepared request through the trusted host transport.
+    ///
+    /// This field was appended; callers must check `struct_size` before reading.
+    pub request_http: Option<ProviderHttpRequestFn>,
 }
 
 /// Completion signal a **v2** streaming provider calls **after** its request fn
@@ -2125,6 +2171,25 @@ mod tests {
         assert!(
             !core::mem::needs_drop::<ProviderStreamControl>(),
             "the control struct is fn pointers + a u32: it must stay Copy/POD"
+        );
+    }
+
+    /// Pins the protected HTTP callback as the last size-versioned field.
+    #[test]
+    fn protected_provider_http_callback_is_appended() {
+        use core::mem::size_of;
+
+        let report = core::mem::offset_of!(ProtectedProviderControl, report_applied_settings);
+        let http = core::mem::offset_of!(ProtectedProviderControl, request_http);
+        assert_eq!(
+            http,
+            report + size_of::<Option<ProviderAppliedSettingsFn>>(),
+            "request_http must be appended after the existing report callback"
+        );
+        assert_eq!(
+            http + size_of::<Option<ProviderHttpRequestFn>>(),
+            size_of::<ProtectedProviderControl>(),
+            "new controls must extend the size-versioned ABI layout"
         );
     }
 

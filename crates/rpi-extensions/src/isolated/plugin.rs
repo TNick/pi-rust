@@ -205,7 +205,14 @@ impl WorkerHandler for PluginWorker {
             .snapshot()
             .map(|snapshot| snapshot.commands().to_vec())
             .unwrap_or_default();
-        let providers = crate::PluggableProvider::from_session(&session, runtime.handle().clone());
+        let http_host = Arc::new(WorkerProviderHttpHost {
+            client: Arc::clone(&host),
+        });
+        let providers = crate::provider::PluggableProvider::from_session_with_http_host(
+            &session,
+            runtime.handle().clone(),
+            Some(http_host),
+        );
         if tools.is_empty() && commands.is_empty() && providers.is_empty() {
             return Err("no plugin tool or provider registered in the worker".to_owned());
         }
@@ -421,6 +428,31 @@ impl WorkerHandler for PluginWorker {
         }))
         .map_err(|_| "plugin command callback panicked".to_owned())?;
         result
+    }
+}
+
+/// Relays prepared provider HTTP requests through the trusted worker host.
+struct WorkerProviderHttpHost {
+    /// Worker protocol client for host-mediated requests.
+    client: Arc<WorkerHostClient>,
+}
+
+impl crate::provider::ProviderHttpHost for WorkerProviderHttpHost {
+    /// Sends one model-bound prepared request to the host transport.
+    fn request(&self, model: &rpi_ai::Model, request_json: &str) -> Result<String, String> {
+        let request: Value = serde_json::from_str(request_json)
+            .map_err(|_| "provider HTTP request is invalid".to_owned())?;
+        let response = self.client.call(
+            "provider_http_request",
+            json!({
+                "provider": model.provider,
+                "model": model.id,
+                "api": model.api.as_str(),
+                "request": request,
+            }),
+        )?;
+        serde_json::to_string(&response)
+            .map_err(|_| "host provider HTTP response is invalid".to_owned())
     }
 }
 

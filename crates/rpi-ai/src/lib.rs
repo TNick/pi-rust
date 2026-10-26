@@ -37,14 +37,14 @@ pub use error::AiError;
 pub use event_stream::{AssistantMessageEventStream, AssistantMessageEventStreamProducer};
 pub use model::{Model, ProviderOptionsSchema, StreamingProtocolCompat};
 pub use provider::{
-    stream_provider_cancellable, AppliedRequestSettings, AppliedRequestSettingsCallback,
-    CacheRetention, ContextPatch, NoopProviderHooks, Provider, ProviderContinuation, ProviderHooks,
+    AppliedRequestSettings, AppliedRequestSettingsCallback, CacheRetention, ContextPatch,
+    DEFAULT_LLM_API_TIMEOUT, NoopProviderHooks, Provider, ProviderContinuation, ProviderHooks,
     RequestSecret, SecretMaterial, SimpleStreamOptions, SimpleStreamOptionsPatch,
-    DEFAULT_LLM_API_TIMEOUT,
+    applied_settings_for_prepared_http_request, stream_provider_cancellable,
 };
 pub use provider_option_attestation::{
-    attest_provider_options, validate_provider_option_attestation, ProviderOptionAttestation,
-    ProviderOptionDisposition, ProviderOptionsAttestation,
+    ProviderOptionAttestation, ProviderOptionDisposition, ProviderOptionsAttestation,
+    attest_provider_options, validate_provider_option_attestation,
 };
 pub use schema::{validate_json_value, validate_tool_arguments};
 pub use types::{

@@ -54,6 +54,7 @@ fn runtime_shutdown_keeps_one_shot_provider_and_child_capacity_until_ffi_returns
             Arc::new(ExtensionRegistry::new().snapshot()),
             keepalive,
             Handle::current(),
+            None,
         );
         let model = Model::new(
             "m",

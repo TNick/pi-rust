@@ -21,7 +21,10 @@ use std::path::PathBuf;
 pub mod client;
 pub mod plugin;
 pub mod protocol;
+mod provider_http;
 pub mod worker;
+
+pub use provider_http::execute_provider_http_request;
 
 pub use client::{
     AllowlistedHostHandler, HostProcessLauncher, IsolatedWorker, LinuxBubblewrapLauncher,
