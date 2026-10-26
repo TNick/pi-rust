@@ -303,20 +303,29 @@ impl WorkerHandler for PluginWorker {
             .ok_or_else(|| "plugin provider model is not registered".to_owned())?;
         let mut options = provider_options(request.options);
         options.signal = cancellation.clone();
+        let applied_settings = Arc::new(Mutex::new(None));
+        let report_slot = Arc::clone(&applied_settings);
+        let callback: rpi_ai::AppliedRequestSettingsCallback = Arc::new(move |report| {
+            *report_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+        });
         let result = if let Some(secret) = request.secret {
             let secret = rpi_ai::RequestSecret::new(Arc::new(WorkerSecret(secret)));
             loaded.runtime.block_on(async {
                 drain_provider_stream(
                     provider
-                        .stream_simple_with_request_secret(
+                        .stream_simple_with_request_secret_and_applied_settings(
                             model,
                             &request.context,
                             &options,
                             &secret,
                             request.bearer,
+                            callback,
                         )
                         .await,
                     cancellation,
+                    applied_settings,
                 )
                 .await
             })
@@ -327,9 +336,15 @@ impl WorkerHandler for PluginWorker {
             loaded.runtime.block_on(async {
                 drain_provider_stream(
                     provider
-                        .stream_simple(model, &request.context, &options)
+                        .stream_simple_with_applied_settings(
+                            model,
+                            &request.context,
+                            &options,
+                            callback,
+                        )
                         .await,
                     cancellation,
+                    applied_settings,
                 )
                 .await
             })
@@ -438,6 +453,7 @@ fn provider_options(options: WorkerProviderOptions) -> rpi_ai::SimpleStreamOptio
 /// # Parameters
 /// - `stream`: Provider stream to drain.
 /// - `cancellation`: Host cancellation token forwarded to the provider.
+/// - `applied_settings`: Shared slot populated by the provider's safe callback.
 ///
 /// # Returns
 /// Its terminal assistant response.
@@ -447,6 +463,7 @@ fn provider_options(options: WorkerProviderOptions) -> rpi_ai::SimpleStreamOptio
 async fn drain_provider_stream(
     mut stream: rpi_ai::AssistantMessageEventStream,
     cancellation: CancellationToken,
+    applied_settings: Arc<Mutex<Option<rpi_ai::AppliedRequestSettings>>>,
 ) -> Result<WorkerProviderResponse, String> {
     while let Some(event) = tokio::select! {
         () = cancellation.cancelled() => return Err("plugin provider request cancelled".to_owned()),
@@ -460,7 +477,15 @@ async fn drain_provider_stream(
                     rpi_ai::types::DoneReason::ToolUse => WorkerProviderOutcome::ToolUse,
                     rpi_ai::types::DoneReason::Deferred => WorkerProviderOutcome::Deferred,
                 };
-                return Ok(WorkerProviderResponse { message, outcome });
+                let applied_settings = applied_settings
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                return Ok(WorkerProviderResponse {
+                    message,
+                    outcome,
+                    applied_settings,
+                });
             }
             rpi_ai::AssistantMessageEvent::Error { reason, error } => {
                 let outcome = match reason {
@@ -473,6 +498,10 @@ async fn drain_provider_stream(
                 return Ok(WorkerProviderResponse {
                     message: error,
                     outcome,
+                    applied_settings: applied_settings
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take(),
                 });
             }
             _ => {}

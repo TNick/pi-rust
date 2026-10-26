@@ -8,9 +8,9 @@ use super::super::protocol::{
 use super::{IsolatedWorker, WorkerError};
 use rpi_ai::event_stream::create_assistant_message_event_stream;
 use rpi_ai::{
-    AppliedRequestSettingsCallback, AssistantMessage, AssistantMessageEvent,
-    AssistantMessageEventStream, Context, DoneReason, ErrorReason, Model, Provider, RequestSecret,
-    SimpleStreamOptions, StopReason,
+    AppliedRequestSettings, AppliedRequestSettingsCallback, AssistantMessage,
+    AssistantMessageEvent, AssistantMessageEventStream, Context, DoneReason, ErrorReason, Model,
+    Provider, RequestSecret, SimpleStreamOptions, StopReason,
 };
 
 /// A Provider adapter that executes extension callbacks in an isolated worker.
@@ -108,6 +108,7 @@ impl WorkerProvider {
         context: &Context,
         options: &SimpleStreamOptions,
         secret: Option<(&RequestSecret, bool)>,
+        callback: Option<AppliedRequestSettingsCallback>,
     ) -> AssistantMessageEventStream {
         let (mut producer, stream) = create_assistant_message_event_stream();
         let partial = Arc::new(AssistantMessage::empty(
@@ -153,6 +154,9 @@ impl WorkerProvider {
             let response = match result {
                 Ok(Ok(response)) => response,
                 _ => {
+                    if let Some(callback) = callback {
+                        callback(incomplete_settings(&model));
+                    }
                     let error = AssistantMessage::terminal(
                         model.api.clone(),
                         provider_id,
@@ -178,6 +182,13 @@ impl WorkerProvider {
             message.provider = provider_id;
             message.api = model.api.clone();
             message.model.clone_from(&model.id);
+            if let Some(callback) = callback {
+                callback(
+                    response
+                        .applied_settings
+                        .unwrap_or_else(|| incomplete_settings(&model)),
+                );
+            }
             match response.outcome {
                 WorkerProviderOutcome::Stop => producer.push(AssistantMessageEvent::Done {
                     reason: DoneReason::Stop,
@@ -234,7 +245,7 @@ impl Provider for WorkerProvider {
         context: &Context,
         options: &SimpleStreamOptions,
     ) -> AssistantMessageEventStream {
-        self.stream(model, context, options, None)
+        self.stream(model, context, options, None, None)
     }
 
     /// Executes a provider request with a protected host credential.
@@ -246,7 +257,7 @@ impl Provider for WorkerProvider {
         secret: &RequestSecret,
         bearer: bool,
     ) -> AssistantMessageEventStream {
-        self.stream(model, context, options, Some((secret, bearer)))
+        self.stream(model, context, options, Some((secret, bearer)), None)
     }
 
     /// Executes a provider request and reports that extension request settings
@@ -258,8 +269,7 @@ impl Provider for WorkerProvider {
         options: &SimpleStreamOptions,
         callback: AppliedRequestSettingsCallback,
     ) -> AssistantMessageEventStream {
-        callback(incomplete_settings(model));
-        self.stream(model, context, options, None)
+        self.stream(model, context, options, None, Some(callback))
     }
 
     /// Executes a protected provider request and reports opaque settings.
@@ -272,8 +282,13 @@ impl Provider for WorkerProvider {
         bearer: bool,
         callback: AppliedRequestSettingsCallback,
     ) -> AssistantMessageEventStream {
-        callback(incomplete_settings(model));
-        self.stream(model, context, options, Some((secret, bearer)))
+        self.stream(
+            model,
+            context,
+            options,
+            Some((secret, bearer)),
+            Some(callback),
+        )
     }
 }
 
@@ -297,8 +312,8 @@ fn secret_to_string(secret: &RequestSecret) -> String {
 ///
 /// # Returns
 /// A report that does not claim visibility into extension request transforms.
-fn incomplete_settings(model: &Model) -> rpi_ai::AppliedRequestSettings {
-    rpi_ai::AppliedRequestSettings {
+fn incomplete_settings(model: &Model) -> AppliedRequestSettings {
+    AppliedRequestSettings {
         schema_version: "rpi-applied-request-settings-v1".to_owned(),
         provider_id: model.provider.clone(),
         model_id: model.id.clone(),

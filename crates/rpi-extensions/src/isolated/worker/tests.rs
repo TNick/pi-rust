@@ -76,6 +76,19 @@ impl WorkerHandler for ProviderFixture {
                 1,
             ),
             outcome: WorkerProviderOutcome::Stop,
+            applied_settings: Some(rpi_ai::AppliedRequestSettings {
+                schema_version: "rpi-applied-request-settings-v5".to_owned(),
+                provider_id: "fixture-provider".to_owned(),
+                model_id: "fixture-model".to_owned(),
+                api_id: rpi_ai::Api::Faux.as_str().to_owned(),
+                applied_values: Default::default(),
+                request_body_sha256: None,
+                request_header_sha256: None,
+                request_effect_sha256: Some("safe-effect-digest".to_owned()),
+                provider_options: Default::default(),
+                omitted_categories: Vec::new(),
+                complete: true,
+            }),
         })
     }
 
@@ -226,16 +239,21 @@ fn provider_registration_and_request_round_trip_through_worker_protocol() {
     assert_eq!(registrations.commands[0].name, "fixture-command");
     assert_eq!(registrations.providers[0].id, "fixture-provider");
     assert_eq!(registrations.providers[0].models[0].id, "fixture-model");
-    assert!(matches!(
-        frames[1],
-        WorkerFrame::ProviderResult {
-            id: 7,
-            response: WorkerProviderResponse {
-                outcome: WorkerProviderOutcome::Stop,
-                ..
-            },
-        }
-    ));
+    let Some(WorkerFrame::ProviderResult { id, response }) = frames
+        .iter()
+        .find(|frame| matches!(frame, WorkerFrame::ProviderResult { id: 7, .. }))
+    else {
+        panic!("provider response frame: {frames:#?}")
+    };
+    assert_eq!(*id, 7);
+    assert_eq!(response.outcome, WorkerProviderOutcome::Stop);
+    assert_eq!(
+        response
+            .applied_settings
+            .as_ref()
+            .and_then(|settings| settings.request_effect_sha256.as_deref()),
+        Some("safe-effect-digest")
+    );
     assert!(matches!(
         frames.iter().find(|frame| matches!(frame, WorkerFrame::CommandResult { id: 8, .. })),
         Some(WorkerFrame::CommandResult { id: 8, result })

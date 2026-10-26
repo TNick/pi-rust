@@ -1,6 +1,6 @@
 //! Defines the versioned JSON-lines protocol for isolated plugin workers.
 
-use rpi_ai::{AssistantMessage, Context, Model, ThinkingLevel};
+use rpi_ai::{AppliedRequestSettings, AssistantMessage, Context, Model, ThinkingLevel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -94,6 +94,9 @@ pub struct WorkerProviderResponse {
     pub message: AssistantMessage,
     /// Terminal category preserved for host authentication and cancellation logic.
     pub outcome: WorkerProviderOutcome,
+    /// Sanitized request settings reported by the extension provider, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_settings: Option<AppliedRequestSettings>,
 }
 
 /// Safe terminal category reported for a worker provider call.
