@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use rpi_agent::agent_tool::AgentTool;
 use rpi_agent::types::{AgentToolResult, TextContentOrImage};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::actions::{ActionBridge, RuntimeActionHost};
-use crate::loader::{load_session_mixed, PluginKeepalive};
+use crate::loader::{PluginKeepalive, load_session_mixed};
 use crate::registry::ExtensionTool;
 use crate::tool::PluginToolAdapter;
 use crate::{NullDiagnostics, PluginDiagnostics};
@@ -18,7 +18,11 @@ use super::protocol::{
     WorkerCommandSpec, WorkerProviderOptions, WorkerProviderOutcome, WorkerProviderRequest,
     WorkerProviderResponse, WorkerProviderSpec, WorkerToolSpec,
 };
-use super::worker::{serve_worker_stdio, WorkerHandler, WorkerHostClient};
+use super::worker::{WorkerHandler, WorkerHostClient, serve_worker_stdio};
+
+#[cfg(test)]
+#[path = "plugin/tests.rs"]
+mod tests;
 
 /// Native plugin set loaded inside a worker process.
 ///
