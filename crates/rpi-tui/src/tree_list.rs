@@ -9,6 +9,7 @@ use crossterm::event::KeyCode;
 use crate::component::Component;
 use crate::terminal::InputEvent;
 use crate::utils::truncate_to_width;
+use crate::visible_width;
 
 /// One caller-identified item in a tree list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -462,7 +463,8 @@ impl Component for TreeList {
                     "  ".repeat(row.depth),
                     marker
                 );
-                let remaining = width.saturating_sub(prefix.chars().count());
+                let prefix = truncate_to_width(&prefix, width, "");
+                let remaining = width.saturating_sub(visible_width(&prefix));
                 format!("{}{}", prefix, truncate_to_width(&row.label, remaining, ""))
             })
             .collect()
@@ -635,6 +637,7 @@ mod tests {
     //! Tests for generic tree structure, selection, and viewport behavior.
 
     use crate::component::Component;
+    use crate::visible_width;
 
     use super::{TreeItem, TreeList};
 
@@ -725,6 +728,33 @@ mod tests {
             vec!["b", "c"]
         );
         assert_eq!(tree.render(20).len(), 2);
+    }
+
+    /// Keeps every rendered tree row within narrow terminal widths.
+    #[test]
+    fn hierarchy_prefix_is_clipped_to_terminal_width() {
+        let mut root = item("root", None);
+        root.label = "你好e\u{301}x".to_owned();
+        let tree = TreeList::new(
+            vec![
+                root,
+                item("parent", Some("root")),
+                item("leaf", Some("parent")),
+            ],
+            8,
+        )
+        .unwrap();
+        assert!(tree.select("leaf"));
+
+        for width in 0..=8 {
+            assert!(
+                tree.render(width)
+                    .iter()
+                    .all(|line| visible_width(line) <= width),
+                "tree output must fit width {width}"
+            );
+        }
+        assert!(tree.render(1).iter().any(|line| line == "›"));
     }
 
     /// Renders a deep tree without recursively traversing its expanded path.
